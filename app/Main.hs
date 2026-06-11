@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Main entry point: CLI argument parsing and server startup.
-module Main where
+module Main (main) where
 
 import RIO
 import S3OSS.Config
