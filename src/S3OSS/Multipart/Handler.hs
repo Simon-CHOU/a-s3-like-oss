@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Multipart upload HTTP handlers.
-module S3OSS.Multipart.Handler where
+module S3OSS.Multipart.Handler (module S3OSS.Multipart.Handler) where
 
 import RIO hiding (evaluate)
 import S3OSS.Types

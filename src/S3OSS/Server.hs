@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | WAI Application and server startup.
-module S3OSS.Server where
+module S3OSS.Server (module S3OSS.Server) where
 
 import RIO
 import S3OSS.Types

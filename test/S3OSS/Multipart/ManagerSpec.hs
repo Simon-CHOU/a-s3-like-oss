@@ -18,7 +18,7 @@ import Data.Char (isHexDigit)
 import Data.Maybe (isJust)
 import Control.Monad (replicateM)
 import System.IO.Temp (withSystemTempDirectory)
-import Database.SQLite.Simple (execute, Only(..))
+import Database.SQLite.Simple (execute)
 
 spec :: Spec
 spec = do

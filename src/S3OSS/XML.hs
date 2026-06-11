@@ -28,7 +28,7 @@ import qualified Text.XML as X
 
 -- | S3 namespace helper.
 s3Name :: Text -> Name
-s3Name local = Name local (Just "http://s3.amazonaws.com/doc/2006-03-01/") Nothing
+s3Name nm = Name nm (Just "http://s3.amazonaws.com/doc/2006-03-01/") Nothing
 
 -- | Render XML document as lazy ByteString.
 renderLBS :: Document -> BL.ByteString

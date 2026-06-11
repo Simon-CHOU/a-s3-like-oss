@@ -2,7 +2,7 @@
 {-# LANGUAGE DuplicateRecordFields #-}
 
 -- | SQLite metadata persistence layer.
-module S3OSS.Store where
+module S3OSS.Store (module S3OSS.Store) where
 
 import RIO
 import S3OSS.Types

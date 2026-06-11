@@ -7,9 +7,8 @@ import Test.Hspec
 import S3OSS.Bucket.Handler
 import S3OSS.Store
 import S3OSS.Types
-import S3OSS.Auth.Policy
 import S3OSS.Object.Storage (putObject)
-import Network.Wai (Response, responseStatus)
+import Network.Wai (responseStatus)
 import Network.HTTP.Types (status200, status204, status403, status404, status409)
 import System.IO.Temp (withSystemTempDirectory)
 import qualified Data.ByteString as B

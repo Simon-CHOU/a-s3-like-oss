@@ -1,19 +1,16 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Core domain types for the S3-like OSS service.
-module S3OSS.Types where
+module S3OSS.Types (module S3OSS.Types) where
 
 import RIO
 import Data.Time (UTCTime)
 import Data.Aeson (FromJSON, ToJSON)
-import GHC.Generics (Generic)
-import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
-import Data.Text.Encoding (encodeUtf8, decodeUtf8With)
-import Data.Text.Encoding.Error (lenientDecode)
 import qualified Data.Text as T
 import Data.Char (isLower, isDigit)
 import Database.SQLite.Simple.ToField (ToField(..))
@@ -21,7 +18,8 @@ import Database.SQLite.Simple.FromField (FromField(..))
 
 -- | SHA-256 hash in hex encoding.
 newtype Sha256Hex = Sha256Hex { unSha256Hex :: Text }
-  deriving (Show, Eq, Ord, FromJSON, ToJSON, Generic)
+  deriving stock (Show, Eq, Ord, Generic)
+  deriving anyclass (FromJSON, ToJSON)
 
 -- | Smart constructor for Sha256Hex.
 -- Validates: exactly 64 lowercase hex characters.
@@ -35,11 +33,13 @@ mkSha256Hex t
 
 -- | ETag as used in S3 responses (quoted hex).
 newtype ETag = ETag { unETag :: Text }
-  deriving (Show, Eq, FromJSON, ToJSON, Generic)
+  deriving stock (Show, Eq, Generic)
+  deriving anyclass (FromJSON, ToJSON)
 
 -- | Bucket name: 3-63 chars, lowercase, numbers, hyphens, dots.
 newtype BucketName = BucketName { unBucketName :: Text }
-  deriving (Show, Eq, Ord, FromJSON, ToJSON, Generic)
+  deriving stock (Show, Eq, Ord, Generic)
+  deriving anyclass (FromJSON, ToJSON)
 
 -- | Smart constructor for BucketName.
 -- Validates: 3-63 chars, lowercase letters, numbers, hyphens, dots;
@@ -69,7 +69,8 @@ instance FromField BucketName where fromField f = BucketName <$> fromField f
 
 -- | Object key: arbitrary Unicode string (max 1024 bytes in UTF-8).
 newtype ObjectKey = ObjectKey { unObjectKey :: Text }
-  deriving (Show, Eq, Ord, FromJSON, ToJSON, Generic)
+  deriving stock (Show, Eq, Ord, Generic)
+  deriving anyclass (FromJSON, ToJSON)
 
 -- | Smart constructor for ObjectKey.
 -- Validates: non-empty, max 1024 UTF-8 bytes.
@@ -84,7 +85,8 @@ instance FromField ObjectKey where fromField f = ObjectKey <$> fromField f
 
 -- | Access key identifier.
 newtype AccessKey = AccessKey { unAccessKey :: Text }
-  deriving (Show, Eq, FromJSON, ToJSON, Generic)
+  deriving stock (Show, Eq, Generic)
+  deriving anyclass (FromJSON, ToJSON)
 
 -- | Secret access key (never logged or serialized).
 newtype SecretKey = SecretKey { unSecretKey :: ByteString }
@@ -95,11 +97,12 @@ instance Show SecretKey where
 
 -- | Upload ID for multipart uploads.
 newtype UploadId = UploadId { unUploadId :: Text }
-  deriving (Show, Eq, FromJSON, ToJSON, Generic)
+  deriving stock (Show, Eq, Generic)
+  deriving anyclass (FromJSON, ToJSON)
 
 -- | Part number in multipart upload (1-10000).
 newtype PartNumber = PartNumber { unPartNumber :: Int }
-  deriving (Show, Eq, Ord, Generic)
+  deriving stock (Show, Eq, Ord, Generic)
 
 -- | Smart constructor for PartNumber.
 -- Validates: between 1 and 10000 inclusive.

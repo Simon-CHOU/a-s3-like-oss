@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Multipart upload state machine and GC.
-module S3OSS.Multipart.Manager where
+module S3OSS.Multipart.Manager (module S3OSS.Multipart.Manager) where
 
 import RIO
 import S3OSS.Types

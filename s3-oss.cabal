@@ -88,6 +88,7 @@ test-suite s3-oss-test
   hs-source-dirs:      test
   main-is:             Spec.hs
   other-modules:
+    S3OSS.AuthIntegrationSpec
     S3OSS.Auth.SigV4Spec
     S3OSS.Auth.PolicySpec
     S3OSS.Object.StorageSpec
@@ -96,6 +97,7 @@ test-suite s3-oss-test
     S3OSS.Bucket.HandlerSpec
     S3OSS.Multipart.ManagerSpec
     S3OSS.IntegrationSpec
+    S3OSS.E2EUATSpec
   build-depends:
     , base
     , bytestring
@@ -104,7 +106,9 @@ test-suite s3-oss-test
     , directory
     , hspec               ^>=2.11
     , hspec-wai            ^>=0.11
+    , http-conduit
     , http-types
+    , network
     , QuickCheck           ^>=2.14
     , rio
     , s3-oss
@@ -116,4 +120,5 @@ test-suite s3-oss-test
     , time
     , wai
     , wai-extra
+    , warp
     , xml-conduit
