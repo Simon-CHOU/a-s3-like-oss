@@ -13,19 +13,19 @@ import S3OSS.Object.Handler hiding (errorResponse)
 import S3OSS.Object.Storage (putObject)
 import S3OSS.List.Handler hiding (errorResponse)
 import S3OSS.Multipart.Handler hiding (errorResponse)
-import S3OSS.Multipart.Manager
+import S3OSS.Multipart.Manager (uploadGC)
 import S3OSS.XML (renderLBS, renderError)
 import qualified RIO.Text as T
 import qualified Data.Text.Encoding as TE
 import Network.Wai hiding (lazyRequestBody)
 import Network.Wai.Handler.Warp (runSettings, defaultSettings, setPort, setHost)
+import Control.Concurrent (forkIO)
 import Network.Wai.Handler.WarpTLS (runTLS, tlsSettings)
 import Network.HTTP.Types
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
 import Data.Conduit (ConduitT, (.|), runConduit, yield)
 import qualified Data.Conduit.List as CL
-import Control.Concurrent (forkIO)
 import qualified Data.Text.Encoding.Error as TEE
 
 -- | Build the WAI Application.
@@ -84,8 +84,9 @@ app config store req respond = do
       Right user -> do
         let prefix    = lookupQuery "prefix" query
             delimiter = lookupQuery "delimiter" query
+            marker    = lookupQuery "marker" query
             maxKeys   = lookupQuery "max-keys" query >>= readMaybe . T.unpack
-        handleListObjects store user (BucketName bucketName) prefix delimiter maxKeys
+        handleListObjects store user (BucketName bucketName) prefix delimiter marker maxKeys
 
     -- PUT /{bucket}/{key} → PutObject (or UploadPart if ?uploadId present)
     ("PUT", bucketName : keyParts, _) | not (null keyParts) -> case mUser of
@@ -103,9 +104,11 @@ app config store req respond = do
             let contentType = lookup "Content-Type" (requestHeaders req)
             let key = ObjectKey $ T.intercalate "/" keyParts
             (sha256, size, etag) <- putObject dataDir (sourceRequestBody req)
-            _ <- putObjectMeta store (BucketName bucketName) key sha256 size
-                  (fmap (TE.decodeUtf8With TEE.lenientDecode) contentType) [] etag
-            pure $ responseLBS status200 [] ""
+            result <- putObjectMeta store (BucketName bucketName) key sha256 size
+                        (fmap (TE.decodeUtf8With TEE.lenientDecode) contentType) [] etag
+            case result of
+              Left _  -> pure $ errorResponse status404 "NoSuchBucket" "The specified bucket does not exist"
+              Right _ -> pure $ responseLBS status200 [] ""
 
     -- GET /{bucket}/{key} → GetObject
     ("GET", bucketName : keyParts, _) | not (null keyParts) -> case mUser of
@@ -136,7 +139,7 @@ app config store req respond = do
     -- POST /{bucket}/{key}?uploads → CreateMultipartUpload
     ("POST", bucketName : keyParts, _)
       | not (null keyParts)
-      , lookupQueryBytes "uploads" query == Just "" -> case mUser of
+      , isJust (lookup "uploads" query) -> case mUser of
           Left err -> pure err
           Right user -> do
             let key = ObjectKey $ T.intercalate "/" keyParts
@@ -148,7 +151,7 @@ app config store req respond = do
       , Just uploadIdStr <- lookupQuery "uploadId" query -> case mUser of
           Left err -> pure err
           Right user -> do
-            body <- liftIO $ lazyRequestBody req
+            body <- lazyRequestBody req
             handleCompleteMultipartUpload store dataDir user (UploadId uploadIdStr) body
 
     _ -> pure $ errorResponse status405 "MethodNotAllowed" "The specified method is not allowed against this resource"

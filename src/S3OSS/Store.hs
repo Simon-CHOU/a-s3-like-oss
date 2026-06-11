@@ -7,10 +7,10 @@ module S3OSS.Store where
 import RIO
 import S3OSS.Types
 import Database.SQLite.Simple
-import Database.SQLite.Simple.ToField
-import Database.SQLite.Simple.FromField
 import qualified Data.Text as T
 import Data.Time (UTCTime, getCurrentTime, addUTCTime)
+import Data.Time.Format (formatTime, parseTimeM, defaultTimeLocale)
+import Data.List (partition, nub, sort)
 import System.Directory (createDirectoryIfMissing)
 
 -- | Database handle.
@@ -71,21 +71,21 @@ schema = T.intercalate "\n"
 -- Helpers
 
 iso8601 :: UTCTime -> Text
-iso8601 = tshow
+iso8601 = T.pack . formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%S%QZ"
 
-parseTimeIso8601 :: Text -> UTCTime
+parseTimeIso8601 :: Text -> Maybe UTCTime
 parseTimeIso8601 t =
-  case readMaybe (T.unpack t) of
-    Just utc -> utc
-    Nothing  -> error $ "Invalid ISO-8601 timestamp: " <> T.unpack t
+  let s = T.unpack t
+  in  parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M:%S%QZ" s
+      <|> parseTimeM True defaultTimeLocale "%Y-%m-%d %H:%M:%S%Q UTC" s
 
-getBucketId :: Store -> BucketName -> IO Int
+getBucketId :: Store -> BucketName -> IO (Either Text Int)
 getBucketId store name = do
   rows <- query (storeConn store)
     "SELECT id FROM buckets WHERE name = ?" (Only $ unBucketName name)
-  case rows of
-    [Only bid] -> pure bid
-    _ -> error $ "Bucket not found: " <> T.unpack (unBucketName name)
+  pure $ case rows of
+    [Only bid] -> Right bid
+    _          -> Left "BucketNotFound"
 
 getBucketIdMaybe :: Store -> BucketName -> IO (Maybe Int)
 getBucketIdMaybe store name = do
@@ -108,22 +108,33 @@ createBucket store name = do
     Left _  -> pure $ Left "BucketAlreadyExists"
     Right _ -> pure $ Right $ BucketInfo name now
 
-deleteBucket :: Store -> BucketName -> IO Bool
+-- | Result of a bucket deletion attempt.
+data BucketDeleteStatus
+  = BucketDeleted
+  | BucketNotFound
+  | BucketNotEmpty
+  deriving (Eq, Show)
+
+deleteBucket :: Store -> BucketName -> IO BucketDeleteStatus
 deleteBucket store name = do
-  objCount <- query (storeConn store)
-    "SELECT COUNT(*) FROM objects o JOIN buckets b ON o.bucket_id = b.id WHERE b.name = ?"
-    (Only $ unBucketName name) :: IO [Only Int]
-  if objCount == [Only (0 :: Int)]
-    then do
-      execute (storeConn store)
-        "DELETE FROM buckets WHERE name = ?" (Only $ unBucketName name)
-      pure True
-    else pure False
+  mBid <- getBucketIdMaybe store name
+  case mBid of
+    Nothing -> pure BucketNotFound
+    Just bid -> do
+      objCount <- query (storeConn store)
+        "SELECT COUNT(*) FROM objects WHERE bucket_id = ?"
+        (Only bid) :: IO [Only Int]
+      if objCount == [Only (0 :: Int)]
+        then do
+          execute (storeConn store)
+            "DELETE FROM buckets WHERE name = ?" (Only $ unBucketName name)
+          pure BucketDeleted
+        else pure BucketNotEmpty
 
 listBuckets :: Store -> IO [BucketInfo]
 listBuckets store = do
   rows <- query_ (storeConn store) "SELECT name, created_at FROM buckets ORDER BY name"
-  pure [BucketInfo (BucketName n) (parseTimeIso8601 t) | (n, t) <- rows]
+  pure $ mapMaybe (\(n, t) -> BucketInfo (BucketName n) <$> parseTimeIso8601 t) rows
 
 headBucket :: Store -> BucketName -> IO Bool
 headBucket store name = do
@@ -133,19 +144,22 @@ headBucket store name = do
 
 -- Object operations
 
-putObjectMeta :: Store -> BucketName -> ObjectKey -> Sha256Hex -> Int64 -> Maybe Text -> [(Text, Text)] -> ETag -> IO ObjectInfo
+putObjectMeta :: Store -> BucketName -> ObjectKey -> Sha256Hex -> Int64 -> Maybe Text -> [(Text, Text)] -> ETag -> IO (Either Text ObjectInfo)
 putObjectMeta store bucket key hash size contentType metaPairs etag = do
   now <- getCurrentTime
-  bucketId <- getBucketId store bucket
-  let metaText = "[]" :: Text  -- simplified; full JSON encoding not needed for MVP
-  execute (storeConn store)
-    "INSERT INTO objects (bucket_id, key, sha256, size, content_type, etag, metadata, created_at, updated_at) \
-    \VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
-    \ON CONFLICT(bucket_id, key) DO UPDATE SET \
-    \  sha256=excluded.sha256, size=excluded.size, content_type=excluded.content_type, \
-    \  etag=excluded.etag, metadata=excluded.metadata, updated_at=excluded.updated_at"
-    (bucketId, unObjectKey key, unSha256Hex hash, size, contentType, unETag etag, metaText, iso8601 now, iso8601 now)
-  pure $ ObjectInfo bucket key hash size contentType metaPairs etag now now
+  eBucketId <- getBucketId store bucket
+  case eBucketId of
+    Left err -> pure $ Left err
+    Right bucketId -> do
+      let metaText = "[]" :: Text  -- simplified; full JSON encoding not needed for MVP
+      execute (storeConn store)
+        "INSERT INTO objects (bucket_id, key, sha256, size, content_type, etag, metadata, created_at, updated_at) \
+        \VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+        \ON CONFLICT(bucket_id, key) DO UPDATE SET \
+        \  sha256=excluded.sha256, size=excluded.size, content_type=excluded.content_type, \
+        \  etag=excluded.etag, metadata=excluded.metadata, updated_at=excluded.updated_at"
+        (bucketId, unObjectKey key, unSha256Hex hash, size, contentType, unETag etag, metaText, iso8601 now, iso8601 now)
+      pure $ Right $ ObjectInfo bucket key hash size contentType metaPairs etag now now
 
 getObjectMeta :: Store -> BucketName -> ObjectKey -> IO (Maybe ObjectInfo)
 getObjectMeta store bucket key = do
@@ -154,11 +168,12 @@ getObjectMeta store bucket key = do
     \FROM objects o JOIN buckets b ON o.bucket_id = b.id \
     \WHERE b.name = ? AND o.key = ?"
     (unBucketName bucket, unObjectKey key)
-  pure $ listToMaybe $ map toObjectInfo rows
+  pure $ listToMaybe $ mapMaybe toObjectInfo rows
   where
-    toObjectInfo (bn, k, h, sz, ct, e, ca, ua) =
-      ObjectInfo (BucketName bn) (ObjectKey k) (Sha256Hex h) sz ct [] (ETag e)
-        (parseTimeIso8601 ca) (parseTimeIso8601 ua)
+    toObjectInfo (bn, k, h, sz, ct, e, ca, ua) = do
+      ca' <- parseTimeIso8601 ca
+      ua' <- parseTimeIso8601 ua
+      Just $ ObjectInfo (BucketName bn) (ObjectKey k) (Sha256Hex h) sz ct [] (ETag e) ca' ua'
 
 deleteObjectMeta :: Store -> BucketName -> ObjectKey -> IO Bool
 deleteObjectMeta store bucket key = do
@@ -169,39 +184,91 @@ deleteObjectMeta store bucket key = do
       execute (storeConn store)
         "DELETE FROM objects WHERE bucket_id = ? AND key = ?"
         (bucketId, unObjectKey key)
-      [Only changes] <- query_ (storeConn store) "SELECT changes()" :: IO [Only Int]
-      pure (changes > 0)
+      rows <- query_ (storeConn store) "SELECT changes()" :: IO [Only Int]
+      let rowCount = case rows of
+            [Only c] -> c
+            _        -> 0
+      pure (rowCount > 0)
 
-listObjects :: Store -> BucketName -> Maybe Text -> Maybe Text -> Int -> IO [ObjectInfo]
-listObjects store bucket prefix _delimiter maxKeys = do
+listObjects :: Store -> BucketName -> Maybe Text -> Maybe Text -> Maybe Text -> Int -> IO ([ObjectInfo], [Text])
+listObjects store bucket prefix delimiter marker maxKeys = do
   mBid <- getBucketIdMaybe store bucket
   case mBid of
-    Nothing -> pure []
+    Nothing -> pure ([], [])
     Just bucketId -> do
-      let baseQuery = "SELECT b.name, o.key, o.sha256, o.size, o.content_type, o.etag, o.created_at, o.updated_at \
-                      \FROM objects o JOIN buckets b ON o.bucket_id = b.id WHERE b.id = ?"
-          (prefixClause, params) = case prefix of
-            Just p  -> (" AND o.key LIKE ?", [tshow bucketId, p <> "%"])
-            Nothing -> ("", [tshow bucketId])
-          query' = baseQuery <> prefixClause <> " ORDER BY o.key LIMIT " <> tshow (maxKeys + 1)
-      rows <- query (storeConn store) (Query query') (map (\(Only t) -> t) (map Only params) :: [Text])
-      pure $ map toObj rows
+      let limit = maxKeys + 1
+      rows <- fetchRows bucketId prefix marker limit
+      let objects = mapMaybe toObj rows
+      case delimiter of
+        Nothing -> pure (take maxKeys objects, [])
+        Just d  -> pure $ groupByDelimiter prefix d objects maxKeys
   where
-    toObj (bn, k, h, sz, ct, e, ca, ua) =
-      ObjectInfo (BucketName bn) (ObjectKey k) (Sha256Hex h) sz ct [] (ETag e)
-        (parseTimeIso8601 ca) (parseTimeIso8601 ua)
+    fetchRows bid mPrefix mMarker lim = case (mPrefix, mMarker) of
+      (Just p, Just m) -> query (storeConn store)
+        "SELECT b.name, o.key, o.sha256, o.size, o.content_type, o.etag, o.created_at, o.updated_at \
+        \FROM objects o JOIN buckets b ON o.bucket_id = b.id \
+        \WHERE b.id = ? AND o.key LIKE ? AND o.key > ? \
+        \ORDER BY o.key LIMIT ?"
+        (bid, p <> "%", m, lim) :: IO [(Text, Text, Text, Int64, Maybe Text, Text, Text, Text)]
+      (Just p, Nothing) -> query (storeConn store)
+        "SELECT b.name, o.key, o.sha256, o.size, o.content_type, o.etag, o.created_at, o.updated_at \
+        \FROM objects o JOIN buckets b ON o.bucket_id = b.id WHERE b.id = ? AND o.key LIKE ? \
+        \ORDER BY o.key LIMIT ?"
+        (bid, p <> "%", lim) :: IO [(Text, Text, Text, Int64, Maybe Text, Text, Text, Text)]
+      (Nothing, Just m) -> query (storeConn store)
+        "SELECT b.name, o.key, o.sha256, o.size, o.content_type, o.etag, o.created_at, o.updated_at \
+        \FROM objects o JOIN buckets b ON o.bucket_id = b.id WHERE b.id = ? AND o.key > ? \
+        \ORDER BY o.key LIMIT ?"
+        (bid, m, lim) :: IO [(Text, Text, Text, Int64, Maybe Text, Text, Text, Text)]
+      (Nothing, Nothing) -> query (storeConn store)
+        "SELECT b.name, o.key, o.sha256, o.size, o.content_type, o.etag, o.created_at, o.updated_at \
+        \FROM objects o JOIN buckets b ON o.bucket_id = b.id WHERE b.id = ? \
+        \ORDER BY o.key LIMIT ?"
+        (bid, lim) :: IO [(Text, Text, Text, Int64, Maybe Text, Text, Text, Text)]
+
+    toObj (bn, k, h, sz, ct, e, ca, ua) = do
+      ca' <- parseTimeIso8601 ca
+      ua' <- parseTimeIso8601 ua
+      Just $ ObjectInfo (BucketName bn) (ObjectKey k) (Sha256Hex h) sz ct [] (ETag e) ca' ua'
+
+    -- | Group objects by delimiter: keys containing the delimiter after the prefix
+    -- become CommonPrefixes, others remain as regular object entries.
+    groupByDelimiter mPrefix d objs limit =
+      let (dirLike, fileLike) = partition (hasDelimiterAfterPrefix mPrefix d . unObjectKey . oiKey) objs
+          commonPrefs = nub $ sort $ mapMaybe (extractCommonPrefix mPrefix d . unObjectKey . oiKey) dirLike
+          takeFiles = take limit fileLike
+          remaining = limit - length takeFiles
+          takePrefs = take remaining commonPrefs
+      in (takeFiles, takePrefs)
+
+    hasDelimiterAfterPrefix mPrefix d key =
+      let stripped = case mPrefix of
+            Just p  -> fromMaybe key (T.stripPrefix p key)
+            Nothing -> key
+      in d `T.isInfixOf` stripped
+
+    extractCommonPrefix mPrefix d key =
+      let stripped = case mPrefix of
+            Just p  -> fromMaybe key (T.stripPrefix p key)
+            Nothing -> key
+      in case T.breakOn d stripped of
+           (_, "") -> Nothing
+           (part, _) -> Just (fromMaybe "" mPrefix <> part <> d)
 
 -- Multipart operations
 
-createMultipartUpload :: Store -> BucketName -> ObjectKey -> UploadId -> IO MultipartUpload
+createMultipartUpload :: Store -> BucketName -> ObjectKey -> UploadId -> IO (Either Text MultipartUpload)
 createMultipartUpload store bucket key uploadId = do
   now <- getCurrentTime
   let expiresAt = addUTCTime (7 * 24 * 60 * 60) now
-  bucketId <- getBucketId store bucket
-  execute (storeConn store)
-    "INSERT INTO multipart_uploads (upload_id, bucket_id, key, state, created_at, expires_at) VALUES (?, ?, ?, 'initiated', ?, ?)"
-    (unUploadId uploadId, bucketId, unObjectKey key, iso8601 now, iso8601 expiresAt)
-  pure $ MultipartUpload uploadId bucket key UploadInitiated now expiresAt
+  eBucketId <- getBucketId store bucket
+  case eBucketId of
+    Left err -> pure $ Left err
+    Right bucketId -> do
+      execute (storeConn store)
+        "INSERT INTO multipart_uploads (upload_id, bucket_id, key, state, created_at, expires_at) VALUES (?, ?, ?, 'initiated', ?, ?)"
+        (unUploadId uploadId, bucketId, unObjectKey key, iso8601 now, iso8601 expiresAt)
+      pure $ Right $ MultipartUpload uploadId bucket key UploadInitiated now expiresAt
 
 addPart :: Store -> UploadId -> PartNumber -> Sha256Hex -> Int64 -> ETag -> IO ()
 addPart store uploadId partNum hash size etag = do
@@ -223,12 +290,14 @@ getMultipartUpload store uploadId = do
     \FROM multipart_uploads m JOIN buckets b ON m.bucket_id = b.id \
     \WHERE m.upload_id = ? AND m.state = 'initiated'"
     (Only $ unUploadId uploadId) :: IO [(Text, Text, Text, Text, Text, Text)]
-  pure $ listToMaybe $ map toUpload rows
+  pure $ listToMaybe $ mapMaybe toUpload rows
   where
-    toUpload (uid, bn, k, st, ca, ea) =
-      MultipartUpload (UploadId uid) (BucketName bn) (ObjectKey k)
+    toUpload (uid, bn, k, st, ca, ea) = do
+      ca' <- parseTimeIso8601 ca
+      ea' <- parseTimeIso8601 ea
+      Just $ MultipartUpload (UploadId uid) (BucketName bn) (ObjectKey k)
         (case st of "initiated" -> UploadInitiated; "completed" -> UploadCompleted; _ -> UploadAborted)
-        (parseTimeIso8601 ca) (parseTimeIso8601 ea)
+        ca' ea'
 
 completeMultipartUpload :: Store -> UploadId -> IO ()
 completeMultipartUpload store uploadId = do
@@ -251,8 +320,3 @@ cleanupExpiredUploads store = do
     (Only $ iso8601 now)
   forM_ expired $ \(Only uid) -> abortMultipartUpload store (UploadId uid)
   pure (length expired)
-
-instance ToField BucketName where toField = toField . unBucketName
-instance FromField BucketName where fromField f = BucketName <$> fromField f
-instance ToField ObjectKey where toField = toField . unObjectKey
-instance FromField ObjectKey where fromField f = ObjectKey <$> fromField f

@@ -13,6 +13,8 @@ import GHC.Generics (Generic)
 import Data.ByteString (ByteString)
 import Data.Text.Encoding (encodeUtf8, decodeUtf8With)
 import Data.Text.Encoding.Error (lenientDecode)
+import Database.SQLite.Simple.ToField (ToField(..))
+import Database.SQLite.Simple.FromField (FromField(..))
 
 -- | SHA-256 hash in hex encoding.
 newtype Sha256Hex = Sha256Hex { unSha256Hex :: Text }
@@ -26,9 +28,15 @@ newtype ETag = ETag { unETag :: Text }
 newtype BucketName = BucketName { unBucketName :: Text }
   deriving (Show, Eq, Ord, FromJSON, ToJSON, Generic)
 
+instance ToField BucketName where toField = toField . unBucketName
+instance FromField BucketName where fromField f = BucketName <$> fromField f
+
 -- | Object key: arbitrary Unicode string.
 newtype ObjectKey = ObjectKey { unObjectKey :: Text }
   deriving (Show, Eq, Ord, FromJSON, ToJSON, Generic)
+
+instance ToField ObjectKey where toField = toField . unObjectKey
+instance FromField ObjectKey where fromField f = ObjectKey <$> fromField f
 
 -- | Access key identifier.
 newtype AccessKey = AccessKey { unAccessKey :: Text }

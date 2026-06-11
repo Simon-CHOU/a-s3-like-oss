@@ -61,6 +61,7 @@ library
     , servant              ^>=0.20
     , servant-server       ^>=0.20
     , sqlite-simple        ^>=0.4
+    , temporary
     , text
     , time
     , wai                  ^>=3.2

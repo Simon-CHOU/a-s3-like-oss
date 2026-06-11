@@ -1,12 +1,18 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Bucket HTTP handlers.
-module S3OSS.Bucket.Handler where
+module S3OSS.Bucket.Handler
+  ( handleCreateBucket
+  , handleDeleteBucket
+  , handleListBuckets
+  , handleHeadBucket
+  ) where
 
 import RIO hiding (evaluate)
 import S3OSS.Types
 import S3OSS.Store
 import S3OSS.XML
+import Text.XML (Document(..), Prologue(..), Element(..), Name(..))
 import S3OSS.Auth.Policy
 import Network.Wai (Response, responseLBS)
 import Network.HTTP.Types (Status, status200, status204, status403, status404, status409)
@@ -31,10 +37,11 @@ handleDeleteBucket store user name =
   if not (evaluate (userPolicies user) S3DeleteBucket (bucketARN name))
     then pure $ errorResponse status403 "AccessDenied" "Access Denied"
     else do
-      deleted <- deleteBucket store name
-      if deleted
-        then pure $ responseLBS status204 [] ""
-        else pure $ errorResponse status409 "BucketNotEmpty" "The bucket you tried to delete is not empty"
+      result <- deleteBucket store name
+      case result of
+        BucketDeleted  -> pure $ responseLBS status204 [] ""
+        BucketNotEmpty -> pure $ errorResponse status409 "BucketNotEmpty" "The bucket you tried to delete is not empty"
+        BucketNotFound -> pure $ errorResponse status404 "NoSuchBucket" "The specified bucket does not exist"
 
 -- | Handle ListBuckets (GET /).
 handleListBuckets :: Store -> User -> IO Response
@@ -66,10 +73,10 @@ bucketARN name = ResourceARN $ "arn:aws:s3:::" <> unBucketName name
 
 renderCreateBucketResult :: BucketName -> BL.ByteString
 renderCreateBucketResult name =
-  "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-  \<CreateBucketResult>\n\
-  \  <BucketName>" <> BL.fromStrict (encodeUtf8 (unBucketName name)) <> "</BucketName>\n\
-  \</CreateBucketResult>\n"
+  renderLBS $ Document (Prologue [] Nothing []) root []
+  where
+    root = Element (Name "CreateBucketResult" Nothing Nothing) mempty
+      [ elt "BucketName" [content $ unBucketName name] ]
 
 errorResponse :: Status -> Text -> Text -> Response
 errorResponse status code message =

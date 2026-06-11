@@ -20,10 +20,13 @@ handleCreateMultipartUpload store dataDir user bucket key =
   if not (evaluate (userPolicies user) S3CreateMultipartUpload (objectARN bucket key))
     then pure $ errorResponse status403 "AccessDenied" "Access Denied"
     else do
-      uploadId <- initiateUpload store dataDir bucket key
-      pure $ responseLBS status200
-        [("Content-Type", "application/xml")]
-        (renderLBS $ renderInitiateMultipartUpload bucket key uploadId)
+      result <- initiateUpload store dataDir bucket key
+      case result of
+        Left _ -> pure $ errorResponse status404 "NoSuchBucket" "The specified bucket does not exist"
+        Right uploadId ->
+          pure $ responseLBS status200
+            [("Content-Type", "application/xml")]
+            (renderLBS $ renderInitiateMultipartUpload bucket key uploadId)
 
 -- | Handle UploadPart.
 handleUploadPart :: Store -> FilePath -> User -> UploadId -> PartNumber -> ConduitT () ByteString IO () -> IO Response

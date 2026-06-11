@@ -87,22 +87,26 @@ renderCopyObjectResult etag lastModified =
       ]
 
 -- | Render ListObjects response.
-renderListObjects :: BucketName -> Maybe Text -> Maybe Text -> Int -> Bool -> [ObjectInfo] -> Document
-renderListObjects bucket prefix delimiter maxKeys isTruncated objects =
+renderListObjects :: BucketName -> Maybe Text -> Maybe Text -> Maybe Text -> Int -> Bool -> [ObjectInfo] -> [Text] -> Document
+renderListObjects bucket prefix delimiter marker maxKeys isTruncated objects commonPrefixes =
   Document (Prologue [] Nothing []) root []
   where
     root = Element (Name "ListBucketResult" Nothing Nothing) mempty
       ( [ elt "Name" [content $ unBucketName bucket]
+        , elt "Prefix" [content $ fromMaybe "" prefix]
+        , elt "Marker" [content $ fromMaybe "" marker]
+        , elt "Delimiter" [content $ fromMaybe "" delimiter]
         , elt "IsTruncated" [content $ if isTruncated then "true" else "false"]
         , elt "MaxKeys" [content $ tshow maxKeys]
         ]
-      ++ maybe [] (\p -> [elt "Prefix" [content p]]) prefix
-      ++ maybe [] (\d -> [elt "Delimiter" [content d]]) delimiter
-      ++ [if null objects
-            then elt "Contents" []
-            else NodeElement $ Element (Name "Contents" Nothing Nothing) mempty (map renderObjectInfo objects)
-         ]
+      ++ map renderCommonPrefix commonPrefixes
+      ++ map renderObjectInfo objects
       )
+
+renderCommonPrefix :: Text -> Node
+renderCommonPrefix p =
+  elt "CommonPrefixes"
+    [ elt "Prefix" [content p] ]
 
 renderObjectInfo :: ObjectInfo -> Node
 renderObjectInfo oi =
@@ -126,11 +130,13 @@ parseCompleteMultipartUpload body = do
           pnNode = filter (\n -> X.nameLocalName (X.elementName n) == "PartNumber") kids
           etNode = filter (\n -> X.nameLocalName (X.elementName n) == "ETag") kids
       pnText <- case pnNode of
-                  (e:_) -> Right $ textContent e
-                  _     -> Left "Missing PartNumber"
+                  [e]      -> Right $ textContent e
+                  (e:_)    -> Right $ textContent e  -- duplicate(s) found, using first
+                  []       -> Left "Missing PartNumber"
       etagText <- case etNode of
-                    (e:_) -> Right $ textContent e
-                    _     -> Left "Missing ETag"
+                    [e]      -> Right $ textContent e
+                    (e:_)    -> Right $ textContent e  -- duplicate(s) found, using first
+                    []       -> Left "Missing ETag"
       pn <- case readMaybe (T.unpack pnText) of
               Just n  -> Right (PartNumber n)
               Nothing -> Left "Invalid PartNumber"
@@ -144,4 +150,4 @@ childElements el = [e | NodeElement e <- X.elementNodes el]
 
 -- | Get all text content from an Element's child nodes.
 textContent :: Element -> Text
-textContent el = T.concat [t | NodeContent t <- X.elementNodes el]
+textContent el = T.strip $ T.concat [t | NodeContent t <- X.elementNodes el]

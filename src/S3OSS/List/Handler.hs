@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | List objects handler.
-module S3OSS.List.Handler where
+module S3OSS.List.Handler (handleListObjects) where
 
 import RIO hiding (evaluate)
 import S3OSS.Types
@@ -12,8 +12,8 @@ import Network.Wai (Response, responseLBS)
 import Network.HTTP.Types (Status, status200, status403, status404)
 
 -- | Handle ListObjects (GET /{bucket}).
-handleListObjects :: Store -> User -> BucketName -> Maybe Text -> Maybe Text -> Maybe Int -> IO Response
-handleListObjects store user bucket prefix delimiter maxKeys =
+handleListObjects :: Store -> User -> BucketName -> Maybe Text -> Maybe Text -> Maybe Text -> Maybe Int -> IO Response
+handleListObjects store user bucket prefix delimiter marker maxKeys =
   if not (evaluate (userPolicies user) S3ListObjects (bucketARN bucket))
     then pure $ errorResponse status403 "AccessDenied" "Access Denied"
     else do
@@ -21,13 +21,15 @@ handleListObjects store user bucket prefix delimiter maxKeys =
       if not exists
         then pure $ errorResponse status404 "NoSuchBucket" "The specified bucket does not exist"
         else do
-          let maxK = fromMaybe 1000 maxKeys
-          objects <- listObjects store bucket prefix delimiter maxK
-          let isTruncated = length objects > maxK
-          let result = take maxK objects
+          let maxK = max 0 $ min 1000 $ fromMaybe 1000 maxKeys
+          (objects, prefixes) <- listObjects store bucket prefix delimiter marker maxK
+          let combinedCount = length objects + length prefixes
+          let isTruncated = combinedCount > maxK
+          let finalObjects = take maxK objects
+          let finalPrefixes = take (maxK - length finalObjects) prefixes
           pure $ responseLBS status200
             [("Content-Type", "application/xml")]
-            (renderLBS $ renderListObjects bucket prefix delimiter maxK isTruncated result)
+            (renderLBS $ renderListObjects bucket prefix delimiter marker maxK isTruncated finalObjects finalPrefixes)
 
 -- Helpers
 

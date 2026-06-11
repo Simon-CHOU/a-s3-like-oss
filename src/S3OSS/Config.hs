@@ -10,6 +10,9 @@ import S3OSS.Prelude
 import S3OSS.Types
 import Data.Aeson (FromJSON)
 import qualified Data.Yaml as Yaml
+import qualified Data.ByteString as B
+import qualified Data.Text as T
+import System.IO.Error (ioError, userError)
 import GHC.Generics (Generic)
 
 -- | Server configuration.

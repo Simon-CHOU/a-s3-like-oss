@@ -1,28 +1,34 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | AWS Signature Version 4 (SigV4) verification.
-module S3OSS.Auth.SigV4 where
+module S3OSS.Auth.SigV4
+  ( deriveSigningKey
+  , AuthHeader(..)
+  , verifySigV4
+  , buildStringToSign
+  , hashCanonicalRequest
+  , buildCanonicalRequest
+  , parseAuthHeader
+  ) where
 
 import RIO
 import S3OSS.Types
 import qualified RIO.Text as T
-import qualified Data.ByteString as B
 import qualified Data.Text.Encoding as TE
 import Crypto.MAC.HMAC (HMAC, hmac, hmacGetDigest)
 import Crypto.Hash.Algorithms (SHA256)
-import Crypto.Hash (Digest, hash)
+import Crypto.Hash (Digest)
 import qualified Crypto.Hash as Crypto
 import qualified Data.ByteArray as BA
 import Network.Wai (Request, requestHeaders, requestMethod, rawPathInfo, rawQueryString)
-import qualified Network.Wai as Wai
 import Data.CaseInsensitive (original)
 import qualified Data.Text as DT
-import Data.List (find)
+import Data.List (find, sortBy)
 
 -- | Derive the AWS SigV4 signing key.
 deriveSigningKey :: SecretKey -> Text -> Text -> Text -> ByteString
 deriveSigningKey (SecretKey secret) date region service =
-  let kDate     = hmacGetDigest $ (hmac secret (TE.encodeUtf8 date) :: HMAC SHA256)
+  let kDate     = hmacGetDigest $ (hmac ("AWS4" <> secret) (TE.encodeUtf8 date) :: HMAC SHA256)
       kRegion   = hmacGetDigest $ (hmac kDate (TE.encodeUtf8 region) :: HMAC SHA256)
       kService  = hmacGetDigest $ (hmac kRegion (TE.encodeUtf8 service) :: HMAC SHA256)
       kSigning  = hmacGetDigest $ (hmac kService ("aws4_request" :: ByteString) :: HMAC SHA256)
@@ -56,21 +62,28 @@ verifySigV4 devMode users req
               case find (\u -> unAccessKey (userAccessKey u) == ahAccessKey ah) users of
                 Nothing -> pure $ Left "Invalid access key"
                 Just user -> do
-                  -- Build string-to-sign and verify
-                  let stringToSign = buildStringToSign req ah
-                      signingKey = deriveSigningKey (userSecretKey user) (ahDate ah) (ahRegion ah) (ahService ah)
-                      expected = hmacGetDigest $ (hmac signingKey (TE.encodeUtf8 stringToSign) :: HMAC SHA256)
-                  let expectedHex = BA.convert expected :: ByteString
-                  if ahSignature ah == expectedHex
-                    then pure $ Right user
-                    else pure $ Left "Signature mismatch"
+                  -- Extract the full ISO 8601 timestamp from X-Amz-Date header
+                  let mAmzDate = lookup "X-Amz-Date" (requestHeaders req)
+                  case mAmzDate of
+                    Nothing -> pure $ Left "Missing X-Amz-Date header"
+                    Just amzDateBs -> do
+                      let amzDate = TE.decodeUtf8With lenientDecode amzDateBs
+                      -- Build string-to-sign and verify
+                      let stringToSign = buildStringToSign amzDate req ah
+                          signingKey = deriveSigningKey (userSecretKey user) (ahDate ah) (ahRegion ah) (ahService ah)
+                          expected = hmacGetDigest $ (hmac signingKey (TE.encodeUtf8 stringToSign) :: HMAC SHA256)
+                      -- Hex-encode the expected digest for comparison (both sides must be hex-encoded ASCII)
+                      let expectedHex = TE.encodeUtf8 (T.pack (show expected))
+                      if ahSignature ah == expectedHex
+                        then pure $ Right user
+                        else pure $ Left "Signature mismatch"
 
 -- | Build the SigV4 string-to-sign.
-buildStringToSign :: Request -> AuthHeader -> Text
-buildStringToSign req ah =
+buildStringToSign :: Text -> Request -> AuthHeader -> Text
+buildStringToSign amzDate req ah =
   T.intercalate "\n"
     [ "AWS4-HMAC-SHA256"
-    , ahDate ah <> "T000000Z"
+    , amzDate
     , ahDate ah <> "/" <> ahRegion ah <> "/" <> ahService ah <> "/aws4_request"
     , hashCanonicalRequest req ah
     ]
@@ -88,9 +101,31 @@ buildCanonicalRequest req ah =
   let method = decodeUtf8With lenientDecode (requestMethod req)
       uri = decodeUtf8With lenientDecode (rawPathInfo req)
       query = decodeUtf8With lenientDecode (rawQueryString req)
-      -- Simplified canonical headers
-      headers = T.intercalate "\n" $ map (\(k, _v) -> T.toLower (decodeUtf8With lenientDecode (original k))) (requestHeaders req)
-      signedHdrs = T.intercalate ";" (ahSignedHeaders ah)
+
+      signedHeaderNames = ahSignedHeaders ah
+      allHeaders = requestHeaders req
+
+      -- Filter to only the headers listed in SignedHeaders
+      relevantHeaders = filter (\(k, _) ->
+        let name = T.toLower (decodeUtf8With lenientDecode (original k))
+        in name `elem` signedHeaderNames
+        ) allHeaders
+
+      -- Sort lexicographically by lowercase header name
+      sortedHeaders = sortBy
+        (\(k1, _) (k2, _) ->
+          compare (T.toLower (decodeUtf8With lenientDecode (original k1)))
+                  (T.toLower (decodeUtf8With lenientDecode (original k2)))
+        ) relevantHeaders
+
+      -- Format as lowercase-header-name:header-value\n
+      headerLines = map (\(k, v) ->
+        T.toLower (decodeUtf8With lenientDecode (original k)) <> ":"
+        <> T.strip (decodeUtf8With lenientDecode v)
+        ) sortedHeaders
+      headers = T.intercalate "\n" headerLines
+
+      signedHdrs = T.intercalate ";" signedHeaderNames
       -- Use UNSIGNED-PAYLOAD for simplicity
       payloadHash = "UNSIGNED-PAYLOAD"
   in T.intercalate "\n"
@@ -98,36 +133,28 @@ buildCanonicalRequest req ah =
 
 -- | Parse the Authorization header.
 parseAuthHeader :: Text -> Either Text AuthHeader
-parseAuthHeader t = do
-  let parts = DT.splitOn ", " t
-  when (null parts) $ Left "Empty Authorization header"
+parseAuthHeader t =
+  case DT.splitOn ", " t of
+    [] -> Left "Empty Authorization header"
+    (algoPart : restParts) -> do
+      unless ("AWS4-HMAC-SHA256" `T.isPrefixOf` algoPart) $
+        Left "Expected AWS4-HMAC-SHA256 algorithm"
 
-  let algoPart = head parts
-  unless ("AWS4-HMAC-SHA256" `T.isPrefixOf` algoPart) $
-    Left "Expected AWS4-HMAC-SHA256 algorithm"
+      -- Parse Credential
+      afterAlgo <- case T.stripPrefix "AWS4-HMAC-SHA256 Credential=" algoPart of
+        Just a  -> Right a
+        Nothing -> Left "Missing Credential"
 
-  -- Parse Credential
-  let afterAlgo = T.stripPrefix "AWS4-HMAC-SHA256 Credential=" algoPart
-  case afterAlgo of
-    Nothing -> Left "Missing Credential"
-    Just credVal -> do
-      let scopeParts = DT.splitOn "/" credVal
-      when (length scopeParts /= 5) $ Left "Invalid credential scope format"
-      let accessKey = scopeParts !! 0
-          date    = scopeParts !! 1
-          region  = scopeParts !! 2
-          service = scopeParts !! 3
-      -- Note: scopeParts !! 4 should be "aws4_request"
-
-      -- Parse SignedHeaders (part 1)
-      let rest = T.intercalate ", " (drop 1 parts)
-      let sigHeadersMaybe = T.stripPrefix "SignedHeaders=" rest
-      case sigHeadersMaybe of
-        Nothing -> Left "Missing SignedHeaders"
-        Just shPart -> do
-          let shParts = DT.splitOn ", Signature=" shPart
-          when (length shParts /= 2) $ Left "Expected SignedHeaders, Signature"
-          let signedHeaders = DT.splitOn ";" (shParts !! 0)
-          let signature = TE.encodeUtf8 (shParts !! 1)
-
-          pure $ AuthHeader accessKey date region service signedHeaders signature
+      case DT.splitOn "/" afterAlgo of
+        [accessKey, date, region, service, _] -> do
+          -- Parse SignedHeaders
+          let rest = T.intercalate ", " restParts
+          case T.stripPrefix "SignedHeaders=" rest of
+            Nothing -> Left "Missing SignedHeaders"
+            Just shPart ->
+              case DT.splitOn ", Signature=" shPart of
+                [signedHeadersStr, sig] -> do
+                  let signedHeaders = DT.splitOn ";" signedHeadersStr
+                  pure $ AuthHeader accessKey date region service signedHeaders (TE.encodeUtf8 sig)
+                _ -> Left "Expected SignedHeaders, Signature"
+        _ -> Left "Invalid credential scope format"
