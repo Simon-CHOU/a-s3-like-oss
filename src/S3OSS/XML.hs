@@ -15,6 +15,7 @@ module S3OSS.XML
   , renderCommonPrefix
   , renderObjectInfo
   , parseCompleteMultipartUpload
+  , parseError
   ) where
 
 import RIO
@@ -149,7 +150,10 @@ parseCompleteMultipartUpload :: BL.ByteString -> Either Text [(PartNumber, ETag)
 parseCompleteMultipartUpload body = do
   doc <- first tshow $ X.parseLBS X.def body
   let root = X.documentRoot doc
-      parts = childElements root
+      rootName = X.nameLocalName (X.elementName root)
+  unless (rootName == "CompleteMultipartUpload") $
+    Left "Expected CompleteMultipartUpload element"
+  let parts = childElements root
   traverse parsePart parts
   where
     parsePart el = do
@@ -168,6 +172,22 @@ parseCompleteMultipartUpload body = do
               Just n  -> Right (PartNumber n)
               Nothing -> Left "Invalid PartNumber"
       pure (pn, ETag etagText)
+
+-- | Parse Error response XML. Returns (Code, Message).
+parseError :: BL.ByteString -> Either Text (Text, Text)
+parseError body = do
+  doc <- first tshow $ X.parseLBS X.def body
+  let root = X.documentRoot doc
+      children = childElements root
+  codeText <- case filter (\e -> X.nameLocalName (X.elementName e) == "Code") children of
+                [e] -> Right $ textContent e
+                (_:_) -> Left "Multiple Code elements"
+                [] -> Left "Missing Code element"
+  msgText <- case filter (\e -> X.nameLocalName (X.elementName e) == "Message") children of
+               [e] -> Right $ textContent e
+               (_:_) -> Left "Multiple Message elements"
+               [] -> Left "Missing Message element"
+  pure (codeText, msgText)
 
 -- XML helpers
 

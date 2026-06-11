@@ -8,24 +8,20 @@ import Test.QuickCheck
 import S3OSS.Auth.SigV4
 import S3OSS.Types
 import Network.Wai (Request, defaultRequest, requestMethod, requestHeaders, rawPathInfo, rawQueryString)
-import Network.HTTP.Types (methodPut)
 import qualified Data.ByteString as B
 import qualified Data.Text as T
 import Data.Text.Encoding (encodeUtf8)
 import Numeric (showHex)
-import Data.Either (isLeft)
-import Data.Char (isDigit)
-import Data.List (isSuffixOf)
-import Data.Text (Text)
 import Data.Word (Word8)
 
 -- ---------------------------------------------------------------------------
 -- Helpers
 -- ---------------------------------------------------------------------------
 
--- | Make a canonical request and then hash it.
-hashOf :: Request -> AuthHeader -> Text
-hashOf req ah = hashCanonicalRequest req ah
+-- | Convert a ByteString to a lowercase zero-padded hex string.
+bytesToHex :: B.ByteString -> T.Text
+bytesToHex bs = T.toLower $ T.pack $ B.unpack bs >>= \w ->
+  let s = showHex w "" in replicate (2 - length s) '0' ++ s
 
 -- ---------------------------------------------------------------------------
 -- Spec
@@ -47,12 +43,23 @@ spec = do
       B.length signingKey `shouldSatisfy` (> 0)
       B.length signingKey `shouldBe` 32
 
-    it "produces the expected signing key per AWS test vector" $ do
+    it "produces the expected signing key per AWS test vector verified via OpenSSL" $ do
       let secret  = SecretKey "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"
       let signingKey = deriveSigningKey secret "20150830" "us-east-1" "iam"
-      let keyHex = T.toLower $ T.pack $ B.unpack signingKey >>= \w ->
-            let s = showHex w "" in replicate (2 - length s) '0' ++ s
-      keyHex `shouldBe` "969fbb94feb542b71ede6f87fe4d5fa29c789342b0f407474670f0c2489e0a0d"
+      bytesToHex signingKey `shouldBe`
+        "c4afb1cc5771d871763a393e44b703571b55cc28424d1a5e86da6ed3c154a4b9"
+
+    it "is deterministic (same inputs produce same key)" $ do
+      let secret = SecretKey "test-secret-key"
+      let k1 = deriveSigningKey secret "20210101" "us-east-1" "s3"
+      let k2 = deriveSigningKey secret "20210101" "us-east-1" "s3"
+      k1 `shouldBe` k2
+
+    it "produces different keys for different dates" $ do
+      let secret = SecretKey "test-secret-key"
+      let k1 = deriveSigningKey secret "20210101" "us-east-1" "s3"
+      let k2 = deriveSigningKey secret "20210102" "us-east-1" "s3"
+      k1 `shouldNotBe` k2
 
     prop "always yields a 32-byte key for arbitrary secrets" $ property $
       forAll (listOf1 arbitrary `suchThat` (not . null)) $ \(bytes :: [Word8]) ->

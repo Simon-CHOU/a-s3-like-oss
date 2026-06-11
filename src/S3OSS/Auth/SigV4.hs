@@ -143,6 +143,7 @@ parseAuthHeader :: Text -> Either Text AuthHeader
 parseAuthHeader t
   | T.null t = Left "Empty Authorization header"
   | otherwise = case DT.splitOn ", " t of
+    []       -> Left "Empty Authorization header"
     (algoPart : restParts) -> do
       unless ("AWS4-HMAC-SHA256" `T.isPrefixOf` algoPart) $
         Left "Expected AWS4-HMAC-SHA256 algorithm"
