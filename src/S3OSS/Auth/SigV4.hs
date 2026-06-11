@@ -43,6 +43,7 @@ data AuthHeader = AuthHeader
   , ahSignedHeaders :: [Text]
   , ahSignature    :: ByteString
   }
+  deriving (Show, Eq)
 
 -- | Verify a SigV4-signed request against a user's secret key.
 -- In development mode, returns the first user unconditionally.
@@ -68,15 +69,21 @@ verifySigV4 devMode users req
                     Nothing -> pure $ Left "Missing X-Amz-Date header"
                     Just amzDateBs -> do
                       let amzDate = TE.decodeUtf8With lenientDecode amzDateBs
-                      -- Build string-to-sign and verify
-                      let stringToSign = buildStringToSign amzDate req ah
-                          signingKey = deriveSigningKey (userSecretKey user) (ahDate ah) (ahRegion ah) (ahService ah)
-                          expected = hmacGetDigest $ (hmac signingKey (TE.encodeUtf8 stringToSign) :: HMAC SHA256)
-                      -- Hex-encode the expected digest for comparison (both sides must be hex-encoded ASCII)
-                      let expectedHex = TE.encodeUtf8 (T.pack (show expected))
-                      if ahSignature ah == expectedHex
-                        then pure $ Right user
-                        else pure $ Left "Signature mismatch"
+                      -- Validate X-Amz-Date format (basic check)
+                      if T.length amzDate /= 16 || T.take 1 (T.drop 8 amzDate) /= "T"
+                        then pure $ Left "Invalid X-Amz-Date format"
+                        else if T.take 8 amzDate /= ahDate ah
+                          then pure $ Left "X-Amz-Date does not match credential scope date"
+                          else do
+                            -- Build string-to-sign and verify
+                            let stringToSign = buildStringToSign amzDate req ah
+                                signingKey = deriveSigningKey (userSecretKey user) (ahDate ah) (ahRegion ah) (ahService ah)
+                                expected = hmacGetDigest $ (hmac signingKey (TE.encodeUtf8 stringToSign) :: HMAC SHA256)
+                            -- Hex-encode the expected digest for comparison (both sides must be hex-encoded ASCII)
+                            let expectedHex = TE.encodeUtf8 (T.pack (show expected))
+                            if ahSignature ah == expectedHex
+                              then pure $ Right user
+                              else pure $ Left "Signature mismatch"
 
 -- | Build the SigV4 string-to-sign.
 buildStringToSign :: Text -> Request -> AuthHeader -> Text
@@ -133,9 +140,9 @@ buildCanonicalRequest req ah =
 
 -- | Parse the Authorization header.
 parseAuthHeader :: Text -> Either Text AuthHeader
-parseAuthHeader t =
-  case DT.splitOn ", " t of
-    [] -> Left "Empty Authorization header"
+parseAuthHeader t
+  | T.null t = Left "Empty Authorization header"
+  | otherwise = case DT.splitOn ", " t of
     (algoPart : restParts) -> do
       unless ("AWS4-HMAC-SHA256" `T.isPrefixOf` algoPart) $
         Left "Expected AWS4-HMAC-SHA256 algorithm"

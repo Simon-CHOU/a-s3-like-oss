@@ -11,9 +11,9 @@ import S3OSS.Auth.Policy
 import Network.Wai (Response, responseLBS)
 import Network.HTTP.Types (Status, status200, status403, status404)
 
--- | Handle ListObjects (GET /{bucket}).
-handleListObjects :: Store -> User -> BucketName -> Maybe Text -> Maybe Text -> Maybe Text -> Maybe Int -> IO Response
-handleListObjects store user bucket prefix delimiter marker maxKeys =
+-- | Handle ListObjects (GET /{bucket}) and ListObjectsV2.
+handleListObjects :: Store -> User -> BucketName -> Maybe Text -> Maybe Text -> Maybe Text -> Maybe Int -> Bool -> IO Response
+handleListObjects store user bucket prefix delimiter marker maxKeys isV2 =
   if not (evaluate (userPolicies user) S3ListObjects (bucketARN bucket))
     then pure $ errorResponse status403 "AccessDenied" "Access Denied"
     else do
@@ -27,9 +27,12 @@ handleListObjects store user bucket prefix delimiter marker maxKeys =
           let isTruncated = combinedCount > maxK
           let finalObjects = take maxK objects
           let finalPrefixes = take (maxK - length finalObjects) prefixes
+          let nextToken = if isTruncated && not (null finalObjects)
+                          then Just $ unObjectKey $ oiKey $ last finalObjects
+                          else Nothing
           pure $ responseLBS status200
             [("Content-Type", "application/xml")]
-            (renderLBS $ renderListObjects bucket prefix delimiter marker maxK isTruncated finalObjects finalPrefixes)
+            (renderLBS $ renderListObjects bucket prefix delimiter marker maxK isTruncated finalObjects finalPrefixes nextToken isV2)
 
 -- Helpers
 

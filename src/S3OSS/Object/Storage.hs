@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TypeApplications #-}
 
 -- | Content-addressable filesystem object storage engine.
 module S3OSS.Object.Storage (putObject, getObject, deleteObject) where
@@ -13,6 +14,7 @@ import qualified Data.Conduit.Binary as CB
 import Control.Monad.Trans.Resource (ResourceT)
 import System.Directory (createDirectoryIfMissing, removeFile, doesFileExist, renameFile)
 import System.IO.Temp (openBinaryTempFile)
+import qualified Control.Exception as E
 
 -- | Write object from a conduit source, store as content-addressed file.
 -- Returns the SHA-256 hash, total size, and ETag bytes.
@@ -24,28 +26,35 @@ putObject dataDir source = do
   -- Use a unique temp file name to prevent concurrent-upload corruption
   (tmpPath, h) <- openBinaryTempFile objectsDir ".tmp-upload"
 
-  -- Stream source into temp file, computing SHA-256 and MD5
-  (sha256Ctx, md5Ctx, totalSize) <- runConduitRes (transPipe liftIO source .| transPipe liftIO (foldHashAndWrite h))
-    `finally` hClose h
+  let body = do
+        -- Stream source into temp file, computing SHA-256 and MD5
+        (sha256Ctx, md5Ctx, totalSize) <- runConduitRes (transPipe liftIO source .| transPipe liftIO (foldHashAndWrite h))
+          `finally` hClose h
 
-  let sha256Digest = hashFinalize sha256Ctx
-  let md5Digest = hashFinalize md5Ctx
-  let sha256Hex = Sha256Hex $ T.pack $ show sha256Digest
-  let md5Text = T.pack $ show md5Digest
-  let etag = ETag $ "\"" <> md5Text <> "\""
+        let sha256Digest = hashFinalize sha256Ctx
+        let md5Digest = hashFinalize md5Ctx
+        let sha256Hex = Sha256Hex $ T.pack $ show sha256Digest
+        let md5Text = T.pack $ show md5Digest
+        let etag = ETag $ "\"" <> md5Text <> "\""
 
-  -- Move to final content-addressed location
-  let prefix = T.take 2 (unSha256Hex sha256Hex)
-  let shardDir = objectsDir <> "/" <> T.unpack prefix
-  createDirectoryIfMissing True shardDir
-  let finalPath = shardDir <> "/" <> T.unpack (unSha256Hex sha256Hex)
+        -- Move to final content-addressed location
+        let prefix = T.take 2 (unSha256Hex sha256Hex)
+        let shardDir = objectsDir <> "/" <> T.unpack prefix
+        createDirectoryIfMissing True shardDir
+        let finalPath = shardDir <> "/" <> T.unpack (unSha256Hex sha256Hex)
 
-  -- Atomically rename temp file to final location.
-  -- Content-addressed storage guarantees same hash => same content,
-  -- so overwriting an existing file is safe and avoids TOCTOU races.
-  renameFile tmpPath finalPath
+        -- Atomically rename temp file to final location.
+        -- Content-addressed storage guarantees same hash => same content,
+        -- so overwriting an existing file is safe and avoids TOCTOU races.
+        renameFile tmpPath finalPath
 
-  pure (sha256Hex, totalSize, etag)
+        pure (sha256Hex, totalSize, etag)
+
+  body `E.catch` \(e :: E.SomeException) -> do
+    -- Clean up temp file on error; ignore cleanup failures
+    _ <- E.try @E.SomeException $ hClose h
+    _ <- E.try @E.SomeException $ removeFile tmpPath
+    throwIO e
 
 -- | Read object by SHA-256 hash, returns a conduit source streaming bytes.
 -- Returns an empty stream when the object file is not found.

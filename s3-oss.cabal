@@ -91,6 +91,7 @@ test-suite s3-oss-test
     S3OSS.Auth.SigV4Spec
     S3OSS.Auth.PolicySpec
     S3OSS.Object.StorageSpec
+    S3OSS.TypesSpec
     S3OSS.XMLSpec
     S3OSS.Bucket.HandlerSpec
     S3OSS.Multipart.ManagerSpec
@@ -99,8 +100,10 @@ test-suite s3-oss-test
     , bytestring
     , conduit
     , crypton
+    , directory
     , hspec               ^>=2.11
     , hspec-wai            ^>=0.11
+    , http-types
     , QuickCheck           ^>=2.14
     , rio
     , s3-oss

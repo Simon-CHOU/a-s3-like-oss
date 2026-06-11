@@ -1,3 +1,2 @@
-builddir: /tmp/s3-oss-dist
 ignore-project: False
 tests: True

@@ -8,10 +8,9 @@ import S3OSS.Types
 import S3OSS.Config
 import S3OSS.Store
 import S3OSS.Auth.SigV4
-import S3OSS.Bucket.Handler hiding (errorResponse)
+import S3OSS.Bucket.Handler
 import S3OSS.Object.Handler hiding (errorResponse)
-import S3OSS.Object.Storage (putObject)
-import S3OSS.List.Handler hiding (errorResponse)
+import S3OSS.List.Handler
 import S3OSS.Multipart.Handler hiding (errorResponse)
 import S3OSS.Presigned (validatePresignedUrl)
 import S3OSS.Multipart.Manager (uploadGC)
@@ -27,7 +26,6 @@ import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
 import Data.Conduit (ConduitT, (.|), runConduit, yield)
 import qualified Data.Conduit.List as CL
-import qualified Data.Text.Encoding.Error as TEE
 
 -- | Build the WAI Application.
 mkApp :: ResolvedConfig -> Store -> IO Application
@@ -90,15 +88,16 @@ app config store req respond = do
       Left err -> pure err
       Right user -> handleHeadBucket store user (BucketName bucketName)
 
-    -- GET /{bucket} → ListObjects
+    -- GET /{bucket} → ListObjects / ListObjectsV2
     ("GET", [bucketName], _) -> case mUser of
       Left err -> pure err
       Right user -> do
-        let prefix    = lookupQuery "prefix" query
+        let isV2      = lookupQuery "list-type" query == Just "2"
+            prefix    = lookupQuery "prefix" query
             delimiter = lookupQuery "delimiter" query
-            marker    = lookupQuery "marker" query
+            marker    = if isV2 then lookupQuery "continuation-token" query else lookupQuery "marker" query
             maxKeys   = lookupQuery "max-keys" query >>= readMaybe . T.unpack
-        handleListObjects store user (BucketName bucketName) prefix delimiter marker maxKeys
+        handleListObjects store user (BucketName bucketName) prefix delimiter marker maxKeys isV2
 
     -- PUT /{bucket}/{key} → PutObject (or UploadPart if ?uploadId present, or CopyObject if x-amz-copy-source header)
     ("PUT", bucketName : keyParts, _) | not (null keyParts) -> case mUser of
@@ -162,7 +161,7 @@ app config store req respond = do
             handleCreateMultipartUpload store dataDir user (BucketName bucketName) key
 
     -- POST /{bucket}/{key}?uploadId=ID → CompleteMultipartUpload
-    ("POST", bucketName : keyParts, _)
+    ("POST", _bucketName : keyParts, _)
       | not (null keyParts)
       , Just uploadIdStr <- lookupQuery "uploadId" query -> case mUser of
           Left err -> pure err
@@ -187,7 +186,7 @@ lookupQueryBytes key q = join (lookup key q)
 -- | Turn a WAI request body into a conduit source.
 sourceRequestBody :: MonadIO m => Request -> ConduitT () ByteString m ()
 sourceRequestBody req = do
-  chunk <- liftIO $ requestBody req
+  chunk <- liftIO $ getRequestBodyChunk req
   unless (B.null chunk) $ do
     yield chunk
     sourceRequestBody req
