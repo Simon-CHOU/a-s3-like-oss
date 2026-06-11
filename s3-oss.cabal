@@ -95,6 +95,7 @@ test-suite s3-oss-test
     S3OSS.XMLSpec
     S3OSS.Bucket.HandlerSpec
     S3OSS.Multipart.ManagerSpec
+    S3OSS.IntegrationSpec
   build-depends:
     , base
     , bytestring

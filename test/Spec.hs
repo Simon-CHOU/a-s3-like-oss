@@ -8,6 +8,7 @@ import qualified S3OSS.Auth.SigV4Spec
 import qualified S3OSS.Bucket.HandlerSpec
 import qualified S3OSS.Multipart.ManagerSpec
 import qualified S3OSS.TypesSpec
+import qualified S3OSS.IntegrationSpec
 
 main :: IO ()
 main = hspec $ do
@@ -18,3 +19,4 @@ main = hspec $ do
   S3OSS.Bucket.HandlerSpec.spec
   S3OSS.Multipart.ManagerSpec.spec
   S3OSS.TypesSpec.spec
+  S3OSS.IntegrationSpec.spec

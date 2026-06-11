@@ -15,6 +15,7 @@ import Control.Monad.Trans.Resource (ResourceT)
 import System.Directory (createDirectoryIfMissing, removeFile, doesFileExist, renameFile)
 import System.IO.Temp (openBinaryTempFile)
 import qualified Control.Exception as E
+import System.Random (randomRIO)
 
 -- | Write object from a conduit source, store as content-addressed file.
 -- Returns the SHA-256 hash, total size, and ETag bytes.
@@ -23,19 +24,22 @@ putObject dataDir source = do
   let objectsDir = dataDir <> "/objects"
   createDirectoryIfMissing True objectsDir
 
-  -- Use a unique temp file name to prevent concurrent-upload corruption
-  (tmpPath, h) <- openBinaryTempFile objectsDir ".tmp-upload"
+  -- Generate a unique temp file name with random suffix for safe concurrent writes
+  uniqueTag <- show <$> (randomRIO (0, 0x7FFFFFFF) :: IO Int)
+  (tmpPath, h) <- openBinaryTempFile objectsDir (".tmp-upload-" ++ uniqueTag)
 
   let body = do
         -- Stream source into temp file, computing SHA-256 and MD5
         (sha256Ctx, md5Ctx, totalSize) <- runConduitRes (transPipe liftIO source .| transPipe liftIO (foldHashAndWrite h))
-          `finally` hClose h
 
         let sha256Digest = hashFinalize sha256Ctx
         let md5Digest = hashFinalize md5Ctx
         let sha256Hex = Sha256Hex $ T.pack $ show sha256Digest
         let md5Text = T.pack $ show md5Digest
         let etag = ETag $ "\"" <> md5Text <> "\""
+
+        -- Flush and close handle before rename
+        hClose h
 
         -- Move to final content-addressed location
         let prefix = T.take 2 (unSha256Hex sha256Hex)
@@ -50,8 +54,8 @@ putObject dataDir source = do
 
         pure (sha256Hex, totalSize, etag)
 
+  -- Bracket-style cleanup: close handle and remove temp file on any exception
   body `E.catch` \(e :: E.SomeException) -> do
-    -- Clean up temp file on error; ignore cleanup failures
     _ <- E.try @E.SomeException $ hClose h
     _ <- E.try @E.SomeException $ removeFile tmpPath
     throwIO e
