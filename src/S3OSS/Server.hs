@@ -101,14 +101,8 @@ app config store req respond = do
                 handleUploadPart store dataDir user uid (PartNumber pn) (sourceRequestBody req)
               _ -> pure $ errorResponse status400 "InvalidArgument" "Invalid partNumber or uploadId"
           else do
-            let contentType = lookup "Content-Type" (requestHeaders req)
             let key = ObjectKey $ T.intercalate "/" keyParts
-            (sha256, size, etag) <- putObject dataDir (sourceRequestBody req)
-            result <- putObjectMeta store (BucketName bucketName) key sha256 size
-                        (fmap (TE.decodeUtf8With TEE.lenientDecode) contentType) [] etag
-            case result of
-              Left _  -> pure $ errorResponse status404 "NoSuchBucket" "The specified bucket does not exist"
-              Right _ -> pure $ responseLBS status200 [] ""
+            handlePutObject store dataDir user (BucketName bucketName) key (sourceRequestBody req)
 
     -- GET /{bucket}/{key} → GetObject
     ("GET", bucketName : keyParts, _) | not (null keyParts) -> case mUser of
