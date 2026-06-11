@@ -1,0 +1,247 @@
+================================================================================
+SPIKE REPORT: s3-oss Blocker Analysis
+Date: Thu Jun 11 23:55:05 CST 2026
+================================================================================
+
+1. COMPILER WARNINGS SUMMARY
+--------------------------------------------------------------------------------
+
+Total: 61 warnings across 7 categories
+
+Category                Count   Effort to Fix
+----------------------  ------  -----------------------------------------------
+-Wunused-imports        28      Low. Delete the unused import line in each case.
+-Wmissing-export-lists  14      Low. Add `(module ModuleName)` everywhere.
+-Wderiving-defaults     12      Low. Add default () to each deriving clause.
+-Worphans                4      Medium. Move instances to Types.hs or use newtypes.
+-Wunused-matches         1      Low. Change `bucketName` to `_` or use `_bucketName`.
+-Wname-shadowing         1      Low. Rename local variable or use different name.
+-Wdeprecations          1      Low. Replace requestBody with getRequestBodyChunk.
+
+Total                  61
+
+================================================================================
+
+2. WARNINGS BY MODULE
+--------------------------------------------------------------------------------
+
+-- src/S3OSS/Prelude.hs (8 warnings) --
+  Line 3:5    -Wdodgy-exports       module S3OSS.Prelude re-exports itself (circular)
+  Line 7:1    -Wunused-imports       import RIO qualified (redundant with line 6)
+  Line 8:1    -Wunused-imports       import qualified RIO.Text as T
+  Line 9:1    -Wunused-imports       import qualified Data.ByteString as B
+  Line 10:1   -Wunused-imports       import qualified Data.ByteString.Lazy as BL
+  Line 11:1   -Wunused-imports       import qualified Data.Text.Encoding as TE
+  Line 12:1   -Wunused-imports       import qualified Data.Text.Encoding.Error as TEE
+  All 7 unused imports: Prelude re-exports `module RIO` which already provides all of these.
+
+-- src/S3OSS/Types.hs (11 warnings) --
+  Line 1:1    -Wmissing-export-lists  Module has no export list
+  Line 12:1   -Wunused-imports       Data.Time (UTCTime) — not used directly (re-exported via RIO)
+  Line 13:1   -Wunused-imports       Data.Aeson (FromJSON, ToJSON)
+  Line 14:1   -Wunused-imports       GHC.Generics (Generic)
+  Line 15:1   -Wunused-imports       Data.ByteString (ByteString)
+  Lines 19-42 -Wderiving-defaults    All newtype deriving clauses need `default ()`
+
+-- src/S3OSS/Store.hs (7 warnings) --
+  Line 1:1    -Wmissing-export-lists
+  Line 172:13 -Wname-shadowing       bucket variable shadows outer ? (needs investigation)
+  Lines 255-258 -Worphans           4 orphan instances for ToField/FromField
+
+-- src/S3OSS/Server.hs (3 warnings) --
+  Line 1:1    -Wmissing-export-lists
+  Line 146:14 -Wunused-matches       bucketName bound but never used in CompleteMultipartUpload path
+  Line 171:21 -Wdeprecations         requestBody is deprecated; use getRequestBodyChunk
+
+-- src/S3OSS/Config.hs (2 warnings) --
+  Line 1:1    -Wmissing-export-lists
+  Line 14:1   -Wunused-imports       GHC.Generics (Generic) — redundant; Config re-exports via Prelude
+
+-- src/S3OSS/Auth/SigV4.hs (4 warnings) --
+  Line 1:1    -Wmissing-export-lists
+  Line 9:1    -Wunused-imports       qualified RIO.Text as T
+  Line 13:29  -Wunused-imports       Crypto.Hash (Digest, hash) — specific import subset redundant
+  Line 17:1   -Wunused-imports       qualified Network.Wai as Wai
+
+-- src/S3OSS/Auth/Policy.hs (1 warning) --
+  Line 1:1    -Wmissing-export-lists
+
+-- src/S3OSS/XML.hs (1 warning) --
+  Line 1:1    -Wmissing-export-lists
+
+-- src/S3OSS/Object/Storage.hs (7 warnings) --
+  Line 1:1    -Wmissing-export-lists
+  Line 9:79   -Wunused-imports       Crypto.Hash (MD5, Context, hashInit, hashUpdate, hashFinalize, ...)
+  Line 10:1   -Wunused-imports       qualified Crypto.Hash as Crypto
+  Line 11:1   -Wunused-imports       qualified Data.ByteArray as BA
+  Line 13:39  -Wunused-imports       Data.Conduit (full list: await, yield, transPipe, ...)
+  Line 14:1   -Wunused-imports       qualified Data.Conduit.List as CL
+  Line 16:19  -Wunused-imports       System.IO (IOMode(..), withFile)
+
+-- src/S3OSS/Object/Handler.hs (3 warnings) --
+  Line 1:1    -Wmissing-export-lists
+  Line 16:1   -Wunused-imports       Data.Conduit (ConduitT, (.|), runConduitRes)
+  Line 17:1   -Wunused-imports       qualified Data.Conduit.List as CL
+
+-- src/S3OSS/Multipart/Manager.hs (11 warnings) --
+  Line 1:1    -Wmissing-export-lists
+  Lines 10-25 -Wunused-imports       10 unused imports
+  (These are mostly conduit and crypto imports not used in this module)
+
+-- src/S3OSS/Bucket/Handler.hs (1 warning) --
+  Line 1:1    -Wmissing-export-lists
+
+-- src/S3OSS/List/Handler.hs (1 warning) --
+  Line 1:1    -Wmissing-export-lists
+
+-- src/S3OSS/Multipart/Handler.hs (1 warning) --
+  Line 1:1    -Wmissing-export-lists
+
+-- src/S3OSS/Presigned.hs (3 warnings) --
+  Line 1:1    -Wmissing-export-lists
+  Line 10:1   -Wunused-imports       qualified Data.ByteString as B
+  Line 11:19  -Wunused-imports       Data.Time (UTCTime, getCurrentTime, addUTCTime, NominalDiffTime)
+
+-- app/Main.hs (1 warning) --
+  Line 1:1    -Wmissing-export-lists
+
+================================================================================
+
+3. EFFORT ESTIMATE PER CATEGORY
+--------------------------------------------------------------------------------
+
+HIGH PRIORITY (blocking git commit):
+
+  A) -Wmissing-export-lists (14 warnings)
+     Fix: Add export list to each module. For library modules, `(module ModuleName)`
+     is sufficient. For handlers, export only the public handle* functions.
+     Effort: ~15 minutes. One line per module.
+
+  B) -Wunused-imports (28 warnings)
+     Fix: Delete the unused import lines.
+     Effort: ~20 minutes. Straightforward line deletions.
+
+  C) -Wderiving-defaults (12 warnings, all in Types.hs)
+     Fix: Change `deriving (Show, Eq, ...)` to `deriving (Show, Eq, ...) via any class`.
+     Actually: Since these use `DeriveAnyClass`, need `deriving stock (Show, Eq, ...)` 
+     or add `default ()` in deriving strategy.
+     Effort: ~5 minutes. All in one file.
+
+  D) -Worphans (4 warnings, all in Store.hs)
+     Fix: Move orphan instances to Types.hs where BucketName/ObjectKey are defined,
+     or add `newtype` wrappers in Store.hs.
+     Effort: ~10 minutes. Involves moving code between files.
+
+  E) -Wunused-matches (1 warning, Server.hs:146)
+     Fix: Change `bucketName` in pattern to `_`.
+     Effort: <1 minute.
+
+  F) -Wname-shadowing (1 warning, Store.hs:172)
+     Fix: Rename the shadowing variable or the outer one.
+     Effort: <1 minute.
+
+  G) -Wdodgy-exports (1 warning, Prelude.hs:3)
+     Fix: Remove `module S3OSS.Prelude` from the export list.
+     Effort: <1 minute.
+
+  H) -Wdeprecations (1 warning, Server.hs:171)
+     Fix: Replace `requestBody` with `getRequestBodyChunk`.
+     Requires checking WAI version compatibility.
+     Effort: ~5 minutes.
+
+Total estimated fix time: ~40-60 minutes for all 61 warnings.
+
+================================================================================
+
+4. HLINT STATUS
+--------------------------------------------------------------------------------
+
+hlint is NOT installed.
+It IS installable via: cabal install hlint
+
+Version available: 3.8 (and 3.10 in the index)
+Dependency: requires ghc-lib-parser (large build, ~15-30 minutes)
+Status: Not installed, and will take significant time to build.
+Recommendation: Fix compiler warnings first (fast), install hlint in background later.
+
+================================================================================
+
+5. CRITICAL FINDING: RUNTIME BLOCKER
+--------------------------------------------------------------------------------
+
+The server compiles and starts, but PUT/GET/LIST/DELETE operations on objects
+ALL fail at runtime with:
+
+    SQLite3 returned ErrorError while attempting to perform prepare
+    "...": no such table: objects
+
+ROOT CAUSE:
+  In src/S3OSS/Store.hs, function `initStore`:
+
+    execute_ conn (Query schema)
+
+  The `schema` variable contains 4 CREATE TABLE statements, but sqlite-simple's
+  `execute_` only executes the FIRST statement (via sqlite3_prepare_v2).
+  The `buckets` table IS created, but `objects`, `multipart_uploads`, and
+  `multipart_parts` are NOT.
+
+  This is confirmed by reading the sqlite-simple 0.4.19.0 source:
+    execute_ conn template =
+      withStatement conn template $ \(Statement stmt) -> void $ Base.step stmt
+
+  `withStatement` / `openStatement` calls `sqlite3_prepare_v2` which only
+  processes one SQL statement.
+
+FIX:
+  Split schema into separate execute_ calls, one per CREATE TABLE statement.
+
+Note: CreateBucket works because it only needs the `buckets` table.
+      All other operations fail because they need `objects`, `multipart_uploads`,
+      or `multipart_parts` which were never created.
+
+================================================================================
+
+6. DUPLICATED errorResponse FUNCTIONS
+--------------------------------------------------------------------------------
+
+5 modules each define their own identical copy of errorResponse:
+
+  1. src/S3OSS/Server.hs:206  (defined locally, hides imports from the other 4)
+  2. src/S3OSS/Bucket/Handler.hs:74
+  3. src/S3OSS/Object/Handler.hs:104
+  4. src/S3OSS/List/Handler.hs:37
+  5. src/S3OSS/Multipart/Handler.hs:79
+
+All five are literally identical:
+
+    errorResponse :: Status -> Text -> Text -> Response
+    errorResponse status code message =
+      responseLBS status
+        [("Content-Type", "application/xml")]
+        (renderLBS $ renderError code message)
+
+RECOMMENDED OWNER:
+  S3OSS.XML is the natural home — it already exports renderLBS and renderError,
+  and all handler modules already import it.
+  Move errorResponse to src/S3OSS/XML.hs and have Server.hs import from there
+  instead of defining its own copy.
+  (Task #25 "Centralize errorResponse" is listed as already completed in the task
+   tracker, but the actual code still has 5 copies.)
+
+================================================================================
+
+7. ADDITIONAL OBSERVATIONS
+--------------------------------------------------------------------------------
+
+  - The test suite is not buildable: cabal test fails because tests are not
+    enabled in the cabal project configuration. Fix: add `tests: True` to
+    cabal.project.local or `--enable-tests` to the build command.
+
+  - src/S3OSS/Auth/SigV4.hs and src/S3OSS/Multipart/Manager.hs have the most
+    unused imports (4 and 10 respectively), likely from cargo-cult imports.
+
+  - S3OSS.XML is a good candidate for centralizing errorResponse, bucketARN,
+    objectARN helpers that are duplicated across all handler modules.
+
+  - The -Wdeprecations warning for requestBody in Server.hs suggests the WAI
+    version in use has renamed this function to getRequestBodyChunk.

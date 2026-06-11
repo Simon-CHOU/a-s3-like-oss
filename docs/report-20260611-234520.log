@@ -1,0 +1,118 @@
+============================================================
+E2E UAT Report — s3-oss Project Status
+Timestamp: $(date -Iseconds)
+Goal: 用haskell编写一个安全的s3 like 的local first oss 服务
+============================================================
+
+## 1. Goal Completion: 85%
+
+COMPLETED (✅):
+- All 16 source modules written and compiling (23 .hs files)
+- 1,526 cloc effective Haskell code lines
+- Build passes with GHC 9.6.7
+- 14/14 unit tests pass
+- Server starts and responds (verified: returns valid ListBucketsResult XML)
+- SigV4 signature verification
+- IAM-like policy engine (Deny > Allow, wildcard matching)
+- Bucket CRUD (Create/Delete/List/Head)
+- Object CRUD (Put/Get/Delete/Head/Copy) with conduit streaming
+- Multipart uploads (Create/UploadPart/Complete/Abort + 7-day GC)
+- Presigned URL generation
+- WAI/Warp server with TLS support
+- CLI with optparse-applicative (--dev, --port, --data-dir, --tls-*)
+- SQLite metadata store with full schema
+
+REMAINING (❌):
+- 31 compiler warnings to fix (11 missing-export-lists, 15 unused-imports, etc.)
+- hlint not installed yet
+- Zero git commits
+- errorResponse duplicated across 5 modules (needs dedup)
+- 3 test modules compiled but never imported from Spec.hs
+- No smoke test with AWS CLI
+- cabal.project missing 'tests: True'
+
+## 2. Code Statistics (cloc)
+
+Haskell: 23 files, 1,526 code, 237 blank, 160 comment = 1,923 total lines
+
+Modules by layer:
+  Core:     Types.hs, Prelude.hs, Config.hs, XML.hs
+  Auth:     Auth/SigV4.hs, Auth/Policy.hs
+  Storage:  Store.hs (SQLite), Object/Storage.hs (filesystem)
+  Handlers: Bucket/Handler.hs, Object/Handler.hs, List/Handler.hs,
+            Multipart/Manager.hs, Multipart/Handler.hs
+  Server:   Server.hs, Presigned.hs
+  Entry:    app/Main.hs
+  Tests:    7 spec files
+
+## 3. Architecture Verification
+
+Request flow: ✅ Verified
+  HTTP → Warp/TLS → WAI Routing → Auth (SigV4+Policy) → Handler → Store(DB) + Storage(FS) → S3 XML Response
+
+Auth flow: ✅ Fixed (was bypassed, now uses correct if/else guard pattern)
+  Policy evaluation: 7/7 tests pass (allow, default-deny, deny-overrides, wildcards)
+
+Storage: ✅ Verified
+  Content-addressable (SHA-256), streaming via conduit, atomic rename, dedup
+
+Multipart: ✅ Implemented
+  State machine: Initiated → Parts → Complete/Abort, 7-day GC
+
+## 4. Session Pitfalls (Complete Log)
+=========================================
+
+1. PATH: GHC/cabal installed via ghcup but not on default PATH
+   Fix: export PATH="$HOME/.ghcup/bin:$PATH"
+
+2. cabal update concurrency: Multiple cabal update processes ran simultaneously
+   Fix: Killed stale processes, ran single update
+
+3. zlib build failure: Two concurrent builds tried to install zlib simultaneously
+   Fix: Killed competing processes, retried clean build
+
+4. Auth bypass bug (CRITICAL): All handlers used flawed 'unless (evaluate ...) $ pure $ errorResponse ...'
+   The 'unless' discarded the error Response, continuing to execute the operation
+   Fix: Rewrote all handlers to use 'if not (evaluate ...) then pure errorResponse else do ...'
+
+5. WAI Query type mismatch: 'lookup "prefix" q' returns 'Maybe (Maybe ByteString)', handlers expected 'Maybe Text'
+   Fix: Wrote 'lookupQuery' helper with join + decodeUtf8'
+
+6. XML compilation cascade: X.emptyNode not exported, elementChildren not found, nodeContent not found
+   Fix: Replaced X.emptyNode with mempty, wrote childElements + textContent helpers, used X.qualified record fields
+
+7. Double replace disaster: Global '[]' → 'mempty' corrupted [Node] lists
+   Fix: Rewrote XML.hs from scratch with correct Element constructor usage
+
+8. Agent-induced import issues: Subagent added unnecessary deps (case-insensitive, resourcet, http-types)
+   Conduit types changed to require MonadResource, transPipe liftIO, etc.
+   Fix: Accept the working state, cleanup will happen in lint phase
+
+9. Test OverloadedStrings: 3 test files missing LANGUAGE pragma
+   Fix: Added {-# LANGUAGE OverloadedStrings #-} to PolicySpec, XMLSpec, SigV4Spec
+
+10. Test LambdaCase: XMLSpec used \case without LambdaCase extension
+    Fix: Added {-# LANGUAGE LambdaCase #-}
+
+11. Data.ByteArray import: Test suite didn't have 'memory' package in deps
+    Fix: Simplified SigV4Spec to not need Data.ByteArray
+
+12. Stale background builds: Multiple cabal build processes accumulated
+    Fix: Killed and restarted clean
+
+13. pre-commit-lint skill updated mid-session: Added "build with warnings" requirement
+    Impact: Can't commit until 31 warnings + hlint are fixed
+
+14. errorResponse duplication: Same 5-line function in 5 different modules
+    Fix pending: Move to XML.hs as single source of truth
+
+## 5. Next Steps (Priority Order)
+====================================
+
+1. [P0] Fix 31 compiler warnings (missing-export-lists, unused-imports)
+2. [P0] Install hlint, verify zero hints
+3. [P0] Git commit all files
+4. [P1] Centralize errorResponse in XML.hs
+5. [P1] Add 3 orphaned test modules to Spec.hs
+6. [P2] Add 'tests: True' to cabal.project
+7. [P2] Smoke test with AWS CLI: aws s3 --endpoint-url http://localhost:9000 ls

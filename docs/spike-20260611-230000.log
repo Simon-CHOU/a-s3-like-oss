@@ -1,0 +1,356 @@
+============================================================
+Spike Report — s3-oss Pre-Build Blocker Analysis
+Timestamp: 2026-06-11 23:00
+Focus: Compilation errors, logic bugs, and import issues
+============================================================
+
+1. BUILD PROCESS STATUS
+=======================
+
+Running cabal processes at time of analysis:
+  PID 40258: cabal build (main build, downloading + compiling deps)
+  PID 88638: cabal install hlint
+  PID 18194: cabal update --ignore-project
+  PID 30541: cabal update
+  Various PID: GHC processes compiling dependency packages
+
+State: Build is in the dependency compilation phase. Multiple GHC
+processes (PIDs 89531, 91600, 91602) are actively compiling dependency
+packages (attoparsec, base-orphans, character-ps, clock, colour, assoc,
+dlist). dist-newstyle exists with only a cache directory, no build/ dir
+yet. No compiler output from project code is available because
+dependencies are still being built.
+
+---
+
+2. COMPILATION ERRORS (WILL FAIL TO BUILD)
+===========================================
+
+ERROR A: Server.hs line 94-95 — Type mismatch: Maybe (Maybe ByteString)
+         vs Maybe Text in ListObjects routing
+-----------------------------------------------------------------------
+  File: /home/.../src/S3OSS/Server.hs, lines 94-95
+
+  Code:
+    let prefix = lookup "prefix" q
+        delimiter = lookup "delimiter" q
+
+  Problem:
+    `queryString req` returns `Query = [(ByteString, Maybe ByteString)]`.
+    `lookup` on this type yields `Maybe (Maybe ByteString)`.
+    But `handleListObjects` (List/Handler.hs line 17) expects
+    `Maybe Text` for both `prefix` and `delimiter`.
+
+  The types `Maybe (Maybe ByteString)` and `Maybe Text` are incompatible
+  with no implicit conversion. This WILL cause a GHC type error.
+
+  Fix needed: Each lookup result must be decoded from ByteString to Text,
+  e.g.:
+    prefix = lookup "prefix" q >>= fmap (decodeUtf8With lenientDecode)
+
+  Similarly for `delimiter` on line 95.
+
+
+ERROR B: Server.hs line 96 — Type mismatch in maxKeys computation
+-----------------------------------------------------------------
+  File: /home/.../src/S3OSS/Server.hs, line 96
+
+  Code:
+    maxKeys = lookup "max-keys" q >>= readMaybe . T.unpack
+
+  Problem:
+    `lookup "max-keys" q :: Maybe (Maybe ByteString)`.
+    The `>>=` unwraps the outer Maybe, so the RHS receives
+    `Maybe ByteString`, not `Text`. But `readMaybe . T.unpack :: Text -> Maybe Int`.
+    Applying this to `Maybe ByteString` is a type error.
+
+  Fix needed: The inner `Maybe ByteString` must also be unwrapped, e.g.:
+    maxKeys = lookup "max-keys" q >>= (>>= readMaybe . T.unpack . decodeUtf8With lenientDecode)
+
+  Or more clearly:
+    maxKeys = do
+      mbs <- lookup "max-keys" q
+      bs  <- mbs
+      readMaybe (T.unpack (TE.decodeUtf8With lenientDecode bs))
+
+
+ERROR C (LIKELY): Server.hs line 113 — putObject dataDir (requestBody req)
+                — ConduitT base monad mismatch
+-----------------------------------------------------------------------
+  File: /home/.../src/S3OSS/Server.hs, line 113
+
+  Code:
+    (sha256, size, etag) <- putObject dataDir (requestBody req)
+
+  Problem (needs verification against installed wai version):
+    `putObject :: FilePath -> ConduitT () ByteString IO () -> IO (...)`
+    `requestBody :: Request -> Source IO ByteString`
+    where `Source m o = ConduitT () o m ()`
+
+    If wai's `Source` is exactly `ConduitT () ByteString IO ()`, then
+    the types match. But some wai versions use `ResourceT IO` as the
+    base monad. If the monads differ, this is a type error.
+
+  Verdict: Likely OK for wai >= 3.2 where Source uses pure IO, but
+  should be confirmed during build.
+
+
+---
+
+3. CRITICAL LOGIC BUGS (COMPILE OK, WRONG BEHAVIOR)
+====================================================
+
+BUG 1: Auth bypass in ALL handler modules — `unless` doesn't guard
+------------------------------------------------------------------
+  Affected files:
+    /home/.../src/S3OSS/Bucket/Handler.hs  (lines 19-20, 31-32, 41-42, 52-53)
+    /home/.../src/S3OSS/Object/Handler.hs  (lines 24-25, 36-37, 54-55, 68-69, 83-84)
+    /home/.../src/S3OSS/List/Handler.hs    (lines 19-20)
+    /home/.../src/S3OSS/Multipart/Handler.hs (lines 23-24, 37-38, 50-51, 71-72)
+
+  Pattern in all handlers (e.g. handleCreateBucket):
+    unless (evaluate (userPolicies user) S3CreateBucket (bucketARN name)) $
+      pure $ errorResponse status403 "AccessDenied" "Access Denied"
+    result <- createBucket store name    -- CONTINUES EXECUTING!
+
+  Root cause:
+    `unless cond action` evaluates to `if cond then pure () else action`.
+    The `pure $ errorResponse ...` produces `IO Response` and returns `()`.
+    The `()` is discarded by the `do` block, and execution continues to
+    the NEXT LINE unconditionally. The error response is computed but
+    NEVER RETURNED TO THE CALLER.
+
+  Impact:
+    EVERY authorization check in the entire service is a no-op. Any
+    request succeeds regardless of user policies. This is a severe
+    security vulnerability.
+
+  Fix:
+    Replace the `unless` pattern with a guard that short-circuits:
+      let allowed = evaluate (userPolicies user) S3CreateBucket (bucketARN name)
+      if not allowed
+        then pure $ errorResponse status403 "AccessDenied" "Access Denied"
+        else do
+          result <- createBucket store name
+          ...
+
+    Or using a helper function:
+      guardAuthorized :: Bool -> Response -> IO Response -> IO Response
+      guardAuthorized True  _        action = action
+      guardAuthorized False errResp _       = pure errResp
+
+
+---
+
+4. STYLISTIC ISSUES (COMPILE OK, POOR PRACTICE)
+================================================
+
+Issue 1: Import statements at the bottom of source files
+---------------------------------------------------------
+  File: /home/.../src/S3OSS/Server.hs
+    Lines 214-215: Import statements for S3OSS.XML and S3OSS.Object.Storage
+    appear after all function definitions (lines 1-213).
+    Valid Haskell, but highly unusual and hard to maintain.
+
+  File: /home/.../src/S3OSS/Auth/SigV4.hs
+    Lines 80-81: Import statements for Crypto.Hash appear after
+    their first use in `hashCanonicalRequest` (lines 77-78).
+
+  File: /home/.../src/S3OSS/Multipart/Manager.hs
+    Lines 146-147: Import statements for System.Directory (listDirectory)
+    and Control.Exception (tryIO) at the bottom of file.
+    Line 32: Import for Text.Printf (printf) after its use on line 29.
+
+  Note: The redundant import at Multipart/Manager.hs line 146 adds
+  `listDirectory` to an already existing `import System.Directory` on line 17.
+  This should be a single combined import.
+
+  Also: `tryIO` (used line 121) is available from RIO's re-exports, so the
+  import on line 147 is unnecessary.
+
+  Also: `printf` (used line 29) is imported at line 32 (after use), and
+  `printf` is also available from RIO's re-exports (via `RIO.Printf`).
+
+
+Issue 2: Duplicate errorResponse definitions
+---------------------------------------------
+  The function `errorResponse` is defined independently in:
+    - Server.hs (lines 208-212)
+    - Bucket/Handler.hs (lines 71-75)
+    - Object/Handler.hs (lines 106-110)
+    - List/Handler.hs (lines 40-44)
+    - Multipart/Handler.hs (lines 81-85)
+
+  All five definitions are identical. This should be factored into a
+  shared helper, likely in S3OSS.XML or S3OSS.Prelude. Currently all
+  handler modules already import S3OSS.XML, so adding errorResponse
+  there would be the logical refactoring.
+
+  Additionally, Server.hs's `errorResponse` is in a different module and
+  doesn't conflict with the handler ones, but duplication of utility
+  functions across 5 modules is a maintenance burden.
+
+
+Issue 3: Unused or redundant imports
+-------------------------------------
+  Server.hs line 18: `import Network.Wai` — the entire module is
+    imported, but only `Application`, `Request`, `responseLBS`,
+    `responseStream`, `requestMethod`, `pathInfo`, `queryString`,
+    `requestHeaders`, `requestBody`, and `lazyRequestBody` are used.
+    However, some of these might be transitively needed. The project
+    uses `-Wmissing-export-lists` so unused imports will generate
+    warnings but not errors.
+
+  Server.hs line 25: `Data.Conduit.List as CL` — only `CL.consume`
+    is used (line 181). This is fine.
+
+  Server.hs line 26: `Control.Concurrent (forkIO)` — used on line 32. ✓
+
+  Various files import `Network.HTTP.Types` qualified AND also import
+  specific names unqualified (e.g., `status200`, `status400`). This
+  causes some redundancy but won't cause compilation errors (only
+  warnings with `-Wredundant-constraints`).
+
+
+---
+
+5. MODULE SIGNATURE VERIFICATION (Server.hs vs Handlers)
+=========================================================
+
+All handler function signatures called from Server.hs were verified:
+
+  Call site                            Expects                                   Matches?
+  ---------------------------------------------------------------------------------------
+  handleListBuckets store user         Store -> User -> IO Response              YES
+  handleCreateBucket ... BucketName    Store -> User -> BucketName -> IO Response YES
+  handleDeleteBucket ... BucketName    Store -> User -> BucketName -> IO Response YES
+  handleHeadBucket ... BucketName      Store -> User -> BucketName -> IO Response YES
+  handleListObjects ... prefix del mk  Store -> User -> BucketName               YES
+                                         -> Maybe Text -> Maybe Text -> Maybe Int
+                                         -> IO Response
+  handleUploadPart ... PartNum source  Store -> FilePath -> User -> UploadId     YES (pending
+                                         -> PartNumber -> ConduitT() ByteString     base monad
+                                         IO () -> IO Response                     verification)
+  handleGetObject ... key              Store -> FilePath -> User -> BucketName   YES
+                                         -> ObjectKey -> IO Response
+  handleDeleteObject ... key           Store -> FilePath -> User -> BucketName   YES
+                                         -> ObjectKey -> IO Response
+  handleHeadObject ... key             Store -> User -> BucketName -> ObjectKey  YES
+                                         -> IO Response
+  handleCreateMultipartUpload ... key  Store -> FilePath -> User -> BucketName   YES
+                                         -> ObjectKey -> IO Response
+  handleCompleteMultipartUpload body   Store -> FilePath -> User -> UploadId     YES
+                                         -> BL.ByteString -> IO Response
+  handleAbortMultipartUpload uid       Store -> FilePath -> User -> UploadId     YES
+                                         -> IO Response
+
+  VERDICT: All signatures match. No arity or type discrepancies between
+  what Server.hs passes and what the handler modules expect (modulo the
+  two query-string type issues noted in Section 2).
+
+
+---
+
+6. CIRCULAR IMPORT ANALYSIS
+============================
+
+Module import graph (simplified):
+  S3OSS.Prelude -> base, rio, text, bytestring (no project deps)
+  S3OSS.Types -> Prelude (via RIO), aeson, GHC.Generics
+  S3OSS.XML -> Prelude, Types, text, xml-conduit
+  S3OSS.Config -> Prelude, Types, yaml
+  S3OSS.Store -> Prelude, Types, sqlite-simple
+  S3OSS.Object.Storage -> Prelude, Types, crypton, conduit
+  S3OSS.Auth.Policy -> Prelude, Types
+  S3OSS.Auth.SigV4 -> Prelude, Types, crypton, wai
+  S3OSS.Bucket.Handler -> Prelude, Types, Store, XML, Auth.Policy, wai
+  S3OSS.Object.Handler -> Prelude, Types, Store, Object.Storage, XML, Auth.Policy, wai
+  S3OSS.List.Handler -> Prelude, Types, Store, XML, Auth.Policy, wai
+  S3OSS.Multipart.Manager -> Prelude, Types, Store, Object.Storage, XML, crypton, conduit, random
+  S3OSS.Multipart.Handler -> Prelude, Types, Store, Multipart.Manager, XML, Auth.Policy, wai
+  S3OSS.Presigned -> Prelude, Types, crypton
+  S3OSS.Server -> Prelude, Types, Config, Store, Auth.SigV4, all Handlers,
+                  wai, warp, conduit, bytestream
+
+  VERDICT: NO circular imports detected. The dependency graph is a
+  directed acyclic graph (DAG). Server.hs sits at the top, importing
+  from all leaf modules. The only concern is that three modules
+  (Bucket/Handler, Object/Handler, Multipart/Handler) all define
+  their own `errorResponse`, but these are independent definitions
+  in different modules so no circular dependency arises.
+
+
+---
+
+7. MODULE EXPORT VERIFICATION (cabal file)
+===========================================
+
+All source files under src/ are listed in the library's exposed-modules:
+  - S3OSS.Prelude
+  - S3OSS.Types
+  - S3OSS.XML
+  - S3OSS.Config
+  - S3OSS.Store
+  - S3OSS.Object.Storage
+  - S3OSS.Auth.SigV4
+  - S3OSS.Auth.Policy
+  - S3OSS.Bucket.Handler
+  - S3OSS.Object.Handler
+  - S3OSS.List.Handler
+  - S3OSS.Multipart.Manager
+  - S3OSS.Multipart.Handler
+  - S3OSS.Presigned
+  - S3OSS.Server
+
+  VERDICT: All 15 source modules match. No orphaned source files and
+  no phantom module declarations.
+
+  Note: S3OSS.Prelude is the only module without an explicit export
+  list (the `module S3OSS.Prelude (...)` exports are re-exports).
+  All other modules export everything implicitly (no explicit export
+  list), which is fine for an MVP project. The cabal flags include
+  `-Wmissing-export-lists` but missing export lists are a warning,
+  not an error.
+
+
+---
+
+8. SUMMARY
+==========
+
+PRIORITY 1 — WILL FAIL TO COMPILE (FIX BEFORE BUILD):
+  1. Server.hs lines 94-95: lookup results need ByteString-to-Text decoding
+  2. Server.hs line 96: maxKeys monadic chain needs double-Maybe unwrapping
+
+PRIORITY 1 — SECURITY BUG (FIX BEFORE FIRST RELEASE):
+  3. All handler modules: `unless` pattern bypasses all auth checks entirely
+
+PRIORITY 2 — CLEANUP:
+  4. Move bottom-of-file imports to top of file (Server.hs, SigV4.hs,
+     Multipart/Manager.hs)
+  5. Consolidate duplicate `errorResponse` into shared module
+  6. Combine redundant imports (Multipart/Manager.hs System.Directory)
+
+DEFERRED (will compile, not critical):
+  7. Add explicit export lists to suppress -Wmissing-export-lists warnings
+  8. Remove redundant qualified imports
+
+
+Files read during this spike:
+  /home/.../src/S3OSS/Server.hs
+  /home/.../src/S3OSS/Bucket/Handler.hs
+  /home/.../src/S3OSS/Object/Handler.hs
+  /home/.../src/S3OSS/Object/Storage.hs
+  /home/.../src/S3OSS/List/Handler.hs
+  /home/.../src/S3OSS/Multipart/Handler.hs
+  /home/.../src/S3OSS/Multipart/Manager.hs
+  /home/.../src/S3OSS/Config.hs
+  /home/.../src/S3OSS/Store.hs
+  /home/.../src/S3OSS/Types.hs
+  /home/.../src/S3OSS/XML.hs
+  /home/.../src/S3OSS/Auth/SigV4.hs
+  /home/.../src/S3OSS/Auth/Policy.hs
+  /home/.../src/S3OSS/Presigned.hs
+  /home/.../src/S3OSS/Prelude.hs
+  /home/.../app/Main.hs
+  /home/.../s3-oss.cabal

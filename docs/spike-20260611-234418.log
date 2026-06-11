@@ -1,0 +1,203 @@
+================================================================================
+SPIKE REPORT -- s3-oss Remaining Blocker Analysis
+Timestamp: 2026-06-11 23:44
+Focus: Compiler warnings, hlint readiness, server startup, import issues,
+       pre-commit-lint skill readiness
+================================================================================
+
+EXECUTIVE SUMMARY
+-----------------
+- Build: PASSES (cabal build succeeds)
+- Tests: 14/14 PASS
+- Server starts and responds correctly on --dev --port 9001
+  (GET / returns valid ListBucketsResult XML)
+- Compiler warnings: 27 in library+exe, 4 in tests (total 31)
+- hlint: NOT installed but IS installable via `cabal install hlint`
+- No import resolution errors found
+- pre-commit-lint requirements (hlint + zero warnings): CANNOT be met today
+
+================================================================================
+1. COMPILER WARNINGS (27 in library + executable, 4 in tests = 31 total)
+================================================================================
+
+Warnings appear during a clean build (cabal clean && cabal build) but are
+suppressed during incremental builds. Counts from clean build:
+
+  Category               Count   Description
+  --------               -----   -----------
+  -Wmissing-export-lists  11     Modules lacking explicit export lists
+  -Wunused-imports        15     Redundant or unused import statements
+  -Wunused-matches         1     Unused pattern variable (bucketName)
+  -Wdeprecations           1     requestBody deprecated, use getRequestBodyChunk
+
+  Breakdown by module:
+
+  src/S3OSS/Auth/SigV4.hs         4   (1 missing-export + 3 unused-imports)
+  src/S3OSS/Auth/Policy.hs        1   (missing-export-list)
+  src/S3OSS/XML.hs                1   (missing-export-list)
+  src/S3OSS/Object/Handler.hs     3   (1 missing-export + 2 unused-imports)
+  src/S3OSS/Multipart/Manager.hs 11   (1 missing-export + 10 unused-imports)
+  src/S3OSS/Multipart/Handler.hs  1   (missing-export-list)
+  src/S3OSS/List/Handler.hs       1   (missing-export-list)
+  src/S3OSS/Bucket/Handler.hs     1   (missing-export-list)
+  src/S3OSS/Server.hs             3   (1 missing-export + 1 deprecated + 1 unused-match)
+  app/Main.hs                     1   (missing-export-list)
+
+  Test files:
+  test/S3OSS/Object/StorageSpec.hs 2  (1 unused-import + 1 unused-match)
+  test/S3OSS/XMLSpec.hs           1   (unused-import)
+  test/Spec.hs                    1   (missing-export-list)
+
+  The worst offender is S3OSS.Multipart.Manager with 10 unused imports
+  (qualified imports of CL, CB, TE, BA, Crypto, plus specific redundant
+  names from System.Directory, System.IO, Control.Concurrent, Crypto.Hash).
+
+================================================================================
+2. HLINT INSTALLABILITY
+================================================================================
+
+Status: NOT installed (not in PATH).
+
+Check: `cabal install hlint`
+Result: Installable. Dependency closure:
+  - ghc-lib-parser-9.8.5.20250214
+  - ghc-lib-parser-ex-9.8.0.2
+  - hlint-3.8
+  (plus transitive deps: aeson, yaml, semialign, deriving-aeson)
+
+Install time estimate: Several minutes (compiling ghc-lib-parser is heavy).
+No version conflicts detected with existing project dependencies.
+
+================================================================================
+3. SERVER STARTUP VERIFICATION
+================================================================================
+
+File: app/Main.hs
+CLI: `cabal run s3-oss -- --dev --port 9000`
+
+Verification steps:
+  1. Built `exe:s3-oss` successfully (with warnings, no errors).
+  2. Ran binary: `./s3-oss --dev --port 9001`
+  3. Observed output:
+       s3-oss starting on 127.0.0.1:9001
+       WARNING: Running without TLS (development mode)
+  4. curl http://127.0.0.1:9001/ returned valid XML:
+       <?xml version="1.0" encoding="UTF-8"?>
+       <ListBucketsResult>
+         <Owner><ID>AKID0000000000000000</ID><DisplayName>admin</DisplayName></Owner>
+         <Buckets/>
+       </ListBucketsResult>
+
+Verdict: Server starts and responds correctly. The `--dev` and `--port` flags
+work as expected. No config file needed for dev mode (uses default config).
+
+The "Address already in use" error seen on first try was from a stale
+process; no code defect.
+
+================================================================================
+4. IMPORT ISSUES
+================================================================================
+
+No import resolution failures. The library has 15 modules declared in
+cabal's exposed-modules, all with matching source files. Import graph
+is a DAG with no circular dependencies:
+
+  Leaf modules (no project deps): Prelude, Types
+  Mid-tier: XML, Config, Store, Object.Storage, Auth.Policy, Auth.SigV4
+  Handlers: Bucket.Handler, Object.Handler, List.Handler, Multipart.Manager
+  Top: Server, Multipart.Handler, Presigned
+
+Build passes, so all imports resolve. However, there are unused import
+warnings (see section 1) and one deprecated API usage (requestBody in
+Server.hs line 171).
+
+The deprecated `requestBody` call in Server.hs line 171 should be replaced
+with `getRequestBodyChunk`. These have identical signatures:
+  requestBody :: Request -> IO ByteString
+  getRequestBodyChunk :: Request -> IO ByteString
+
+================================================================================
+5. PRE-COMMIT-LINT SKILL READINESS
+================================================================================
+
+The pre-commit-lint skill requires:
+  (a) hlint installed and runnable  -- YES, installable via cabal
+  (b) cabal build with zero warnings -- NO, 27 library warnings + 4 test warnings
+
+To reach zero warnings, the following fixes are needed:
+
+  REQUIRED (must fix):
+    11 modules: add explicit export lists
+    15 unused imports: remove redundant imports (especially heavy in
+       S3OSS.Multipart.Manager with 10 unused)
+    1 unused pattern variable: Server.hs line 146, bucketName
+    1 deprecation: Server.hs line 171, replace requestBody with
+       getRequestBodyChunk
+
+  OPTIONAL (test warnings, not blocker for pre-commit-lint on library):
+    3 test file warnings (unused imports, unused bindings, missing export list)
+
+Additional issues found (pre-existing, not in scope of this spike):
+  - errorResponse is duplicated across 5 modules (Server.hs, Bucket/Handler.hs,
+    Object/Handler.hs, List/Handler.hs, Multipart/Handler.hs) -- should be
+    centralized in a single module
+  - Test coverage gap: 3 test modules (S3OSS.Auth.SigV4Spec,
+    S3OSS.Bucket.HandlerSpec, S3OSS.Multipart.ManagerSpec) exist and compile
+    but are NOT imported from test/Spec.hs, so they never run
+  - cabal.project needs `tests: True` for `cabal build s3-oss-test` to work
+    without --enable-tests flag
+
+================================================================================
+6. FILES READ DURING THIS SPIKE
+================================================================================
+
+Source files (src/):
+  app/Main.hs
+  src/S3OSS/Prelude.hs
+  src/S3OSS/Types.hs
+  src/S3OSS/XML.hs
+  src/S3OSS/Config.hs
+  src/S3OSS/Store.hs
+  src/S3OSS/Object/Storage.hs
+  src/S3OSS/Auth/SigV4.hs
+  src/S3OSS/Auth/Policy.hs
+  src/S3OSS/Bucket/Handler.hs
+  src/S3OSS/Object/Handler.hs
+  src/S3OSS/List/Handler.hs
+  src/S3OSS/Multipart/Manager.hs
+  src/S3OSS/Multipart/Handler.hs
+  src/S3OSS/Presigned.hs
+  src/S3OSS/Server.hs
+
+Test files:
+  test/Spec.hs
+  test/S3OSS/Auth/SigV4Spec.hs
+  test/S3OSS/Auth/PolicySpec.hs
+  test/S3OSS/Bucket/HandlerSpec.hs
+  test/S3OSS/Multipart/ManagerSpec.hs
+  test/S3OSS/Object/StorageSpec.hs
+  test/S3OSS/XMLSpec.hs
+
+Config files:
+  s3-oss.cabal
+  cabal.project
+
+================================================================================
+7. SUMMARY OF KEY NUMBERS
+================================================================================
+
+  Item                               Value
+  ----                               -----
+  Haskell source files               23 (15 src + 1 app + 7 test)
+  Lines of code (approx)             1500
+  Build status                       PASS
+  Test count                         14/14 pass
+  Server startup                     CONFIRMED OK (--dev --port 9001)
+  Compiler warnings (lib + exe)      27
+  Compiler warnings (test)            4
+  Compiler errors                     0
+  hlint installed                    NO
+  hlint installable                  YES (cabal install hlint)
+  pre-commit-lint requirements met   NO (27 library warnings)
+  Import resolution errors           0
+  Test coverage gap                  3 modules compiled but never run
