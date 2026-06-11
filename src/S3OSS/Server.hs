@@ -13,6 +13,7 @@ import S3OSS.Object.Handler hiding (errorResponse)
 import S3OSS.Object.Storage (putObject)
 import S3OSS.List.Handler hiding (errorResponse)
 import S3OSS.Multipart.Handler hiding (errorResponse)
+import S3OSS.Presigned (validatePresignedUrl)
 import S3OSS.Multipart.Manager (uploadGC)
 import S3OSS.XML (renderLBS, renderError)
 import qualified RIO.Text as T
@@ -36,16 +37,27 @@ mkApp config store = do
 
 -- | Resolve the authenticated user for a request.
 resolveUser :: ResolvedConfig -> Request -> IO (Either Response User)
-resolveUser config req =
-  if scDevelopmentMode (rcServer config)
-    then case rcUsers config of
-           (u:_) -> pure $ Right u
-           []    -> pure $ Left $ errorResponse status500 "InternalError" "No users configured"
-    else do
-      result <- verifySigV4 False (rcUsers config) req
+resolveUser config req = do
+  let query = queryString req
+      hasPresigned = isJust (join $ lookup "Credential" query)
+                  && isJust (join $ lookup "Expires" query)
+                  && isJust (join $ lookup "Signature" query)
+  if hasPresigned
+    then do
+      result <- validatePresignedUrl (rcUsers config) req
       pure $ case result of
-        Left err -> Left $ errorResponse status403 "SignatureDoesNotMatch" err
-        Right user -> Right user
+        Left err              -> Left $ errorResponse status403 "SignatureDoesNotMatch" err
+        Right (user, _, _, _) -> Right user
+    else
+      if scDevelopmentMode (rcServer config)
+        then case rcUsers config of
+               (u:_) -> pure $ Right u
+               []    -> pure $ Left $ errorResponse status500 "InternalError" "No users configured"
+        else do
+          result <- verifySigV4 False (rcUsers config) req
+          pure $ case result of
+            Left err -> Left $ errorResponse status403 "SignatureDoesNotMatch" err
+            Right user -> Right user
 
 -- | Main application handler: route requests based on HTTP method and path.
 app :: ResolvedConfig -> Store -> Application
@@ -88,21 +100,31 @@ app config store req respond = do
             maxKeys   = lookupQuery "max-keys" query >>= readMaybe . T.unpack
         handleListObjects store user (BucketName bucketName) prefix delimiter marker maxKeys
 
-    -- PUT /{bucket}/{key} → PutObject (or UploadPart if ?uploadId present)
+    -- PUT /{bucket}/{key} → PutObject (or UploadPart if ?uploadId present, or CopyObject if x-amz-copy-source header)
     ("PUT", bucketName : keyParts, _) | not (null keyParts) -> case mUser of
       Left err -> pure err
-      Right user ->
-        if isJust (lookupQueryBytes "uploadId" query)
-          then do
-            let pnM = lookupQuery "partNumber" query >>= readMaybe . T.unpack
-                uidM = fmap UploadId (lookupQuery "uploadId" query)
-            case (pnM, uidM) of
-              (Just pn, Just uid) ->
-                handleUploadPart store dataDir user uid (PartNumber pn) (sourceRequestBody req)
-              _ -> pure $ errorResponse status400 "InvalidArgument" "Invalid partNumber or uploadId"
-          else do
-            let key = ObjectKey $ T.intercalate "/" keyParts
-            handlePutObject store dataDir user (BucketName bucketName) key (sourceRequestBody req)
+      Right user -> case lookup "x-amz-copy-source" (requestHeaders req) of
+        Just copySource -> do
+          let parts = B.split 47 copySource  -- split on '/'
+              parts' = dropWhile B.null parts
+          case parts' of
+            (srcBucket : srcKeyParts) -> do
+              let srcBucketName = BucketName $ TE.decodeUtf8 srcBucket
+                  srcKey = ObjectKey $ T.intercalate "/" (map TE.decodeUtf8 srcKeyParts)
+              handleCopyObject store user srcBucketName srcKey (BucketName bucketName) (ObjectKey $ T.intercalate "/" keyParts)
+            _ -> pure $ errorResponse status400 "InvalidArgument" "The x-amz-copy-source header is malformed"
+        Nothing ->
+          if isJust (lookupQueryBytes "uploadId" query)
+            then do
+              let pnM = lookupQuery "partNumber" query >>= readMaybe . T.unpack
+                  uidM = fmap UploadId (lookupQuery "uploadId" query)
+              case (pnM, uidM) of
+                (Just pn, Just uid) ->
+                  handleUploadPart store dataDir user uid (PartNumber pn) (sourceRequestBody req)
+                _ -> pure $ errorResponse status400 "InvalidArgument" "Invalid partNumber or uploadId"
+            else do
+              let key = ObjectKey $ T.intercalate "/" keyParts
+              handlePutObject store dataDir user (BucketName bucketName) key (sourceRequestBody req)
 
     -- GET /{bucket}/{key} → GetObject
     ("GET", bucketName : keyParts, _) | not (null keyParts) -> case mUser of
