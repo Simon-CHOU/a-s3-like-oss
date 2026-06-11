@@ -1,0 +1,10 @@
+dist/
+dist-newstyle/
+.stack-work/
+*.o
+*.hi
+*.dyn_o
+*.dyn_hi
+.env
+data/
+test-data/
