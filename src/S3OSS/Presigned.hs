@@ -10,6 +10,7 @@ import RIO
 import S3OSS.Types
 import qualified RIO.Text as T
 import qualified Data.Text.Encoding as TE
+import Data.List (find)
 import Data.Time (getCurrentTime, addUTCTime, NominalDiffTime)
 import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds, posixSecondsToUTCTime)
 import Crypto.MAC.HMAC (HMAC, hmac, hmacGetDigest)
